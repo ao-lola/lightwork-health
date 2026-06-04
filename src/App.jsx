@@ -170,22 +170,26 @@ function StatCardModal({type,customers,onClose}){
 }
 
 // AI — uses non-streaming fetch since Netlify Functions don't support streaming
+async function callAI(prompt){
+  const r=await fetch("/api/ai",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({prompt,stream:false})});
+  if(!r.ok){const e=await r.text();throw new Error("HTTP "+r.status+": "+e);}
+  const data=await r.json();
+  if(data.error)throw new Error(data.error);
+  return data.content?.map(i=>i.text||"").join("")||"";
+}
+
 function useAI(prompt){
   const [text,setText]=useState("");
   const [loading,setLoading]=useState(true);
-  const [error,setError]=useState(false);
-  const prompted=useRef("");
+  const [error,setError]=useState(null);
+  const keyRef=useRef(0);
   useEffect(()=>{
-    if(!prompt||prompted.current===prompt)return;
-    prompted.current=prompt;
-    setText("");setLoading(true);setError(false);
-    fetch("/api/ai",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({prompt,stream:false})})
-      .then(r=>r.json())
-      .then(data=>{
-        const t=data.content?.map(i=>i.text||"").join("")||"";
-        setText(t);setLoading(false);
-      })
-      .catch(()=>{setError(true);setLoading(false)});
+    if(!prompt)return;
+    const myKey=++keyRef.current;
+    setText("");setLoading(true);setError(null);
+    callAI(prompt)
+      .then(t=>{if(myKey===keyRef.current){setText(t);setLoading(false);}})
+      .catch(e=>{if(myKey===keyRef.current){setError(e.message||"AI error");setLoading(false);}});
   },[prompt]);
   return{text,loading,error};
 }
@@ -474,108 +478,139 @@ function AutomationOpportunities({c}){
 
 function FelicityCopilot({c}){
   const h=getHealthLabel(c.score);
-  const workflowAdopted=Object.values(c.wfAdoption).filter(v=>v>=70).length;
+  const wfAdopted=Object.values(c.wfAdoption).filter(v=>v>=70).length;
   const scoreDrop=c.prevScore-c.score;
   const lowWf=WORKFLOWS.filter(w=>c.wfAdoption[w]<30);
 
-  const prompt=`You are Felicity, an AI Customer Success Copilot for LightWork AI.
+  const prompt=`You are Felicity, an AI-powered Customer Success Copilot built into LightWork AI.
 
-Analyse this account and return ONLY valid JSON (no markdown, no fences):
+Analyse this property management account and return ONLY valid JSON with no markdown fences, no explanation, just the raw JSON object.
+
+Required JSON structure:
 {
-  "status_line": "One sentence: account name, score, status, and key trend",
-  "primary_drivers": ["driver 1","driver 2","driver 3","driver 4"],
-  "business_impact": ["impact 1","impact 2","impact 3"],
-  "recommended_actions": ["action 1","action 2","action 3","action 4"],
-  "customer_email": "Full email from CSM to customer. Professional, warm, specific. Include subject line as first line prefixed with Subject:",
-  "internal_note": "Internal product/engineering note. 3-4 sentences. Specific metrics, technical context, recommended investigation."
+  "status_line": "one sentence starting with the account name, their score, status, and what changed",
+  "why_score_changed": "2-3 sentences explaining specifically why the score is at this level compared to before",
+  "primary_drivers": ["specific driver 1","specific driver 2","specific driver 3"],
+  "business_impact": ["impact on customer 1","impact on customer 2","impact on renewals/expansion"],
+  "recommended_actions": ["specific action 1 with owner","specific action 2 with owner","specific action 3 with owner","specific action 4 with owner"],
+  "customer_email": "Full professional email. First line must be: Subject: [subject line]. Then blank line. Then email body. Sign off as the CSM. Use the account name and specific details.",
+  "internal_note": "3-4 sentences for the product/engineering team. Include specific metrics, workflow names, and what needs investigation."
 }
 
-Account: ${c.name}
-Score: ${c.score}/100 (was ${c.prevScore}, ${c.trend}) | Status: ${h.label}
-Score drop: ${scoreDrop} points over 7 days
-Segment: ${c.segment} | ARR: £${c.arr.toLocaleString()} | Region: ${c.region} | Renewal: ${c.renewalDays} days
+ACCOUNT DATA:
+Name: ${c.name}
+Segment: ${c.segment} | Units: ${c.units.toLocaleString()} | ARR: £${c.arr.toLocaleString()} | Region: ${c.region}
+Health Score NOW: ${c.score}/100 | PREVIOUS: ${c.prevScore}/100 | CHANGE: ${scoreDrop>0?"-"+scoreDrop:"+"+Math.abs(scoreDrop)} points | Trend: ${c.trend}
+Status: ${h.label} | Days live: ${c.daysLive} | Renewal in: ${c.renewalDays} days | Login: ${c.loginFreq}
 
-Category scores:
-- Onboarding (20%): ${c.onb}/100
-- Adoption (30%): ${c.adp}/100 — ${workflowAdopted}/5 workflows active — Login: ${c.loginFreq}
-- Support (20%): ${c.sup}/100 — ${c.escalations} escalations, ${c.failedMessages} failed messages, ${c.openIssues} open issues
-- Sentiment (15%): ${c.sen}/100 — Tenant sat: ${c.tenantSat}%, NPS: ${c.nps}
-- Commercial (15%): ${c.com}/100
+CATEGORY SCORES (weighted):
+Onboarding 20%: ${c.onb}/100 | Training: ${c.trainingComplete}% | Integration: ${c.integrationComplete}%
+Adoption 30%: ${c.adp}/100 | Workflows active: ${wfAdopted}/5 | Login frequency: ${c.loginFreq}
+Support 20%: ${c.sup}/100 | Escalations: ${c.escalations} | Failed messages: ${c.failedMessages} | Open issues: ${c.openIssues}
+Sentiment 15%: ${c.sen}/100 | Tenant satisfaction: ${c.tenantSat}% | NPS: ${c.nps}
+Commercial 15%: ${c.com}/100 | Renewal: ${c.renewalDays} days
 
-Workflow adoption: ${WORKFLOWS.map(w=>`${w}: ${c.wfAdoption[w]}%`).join(", ")}
-Low adoption workflows: ${lowWf.length?lowWf.join(", "):"none"}
+WORKFLOW ADOPTION: ${WORKFLOWS.map(w=>w+": "+c.wfAdoption[w]+"%").join(" | ")}
+LOW ADOPTION (<30%): ${lowWf.length?lowWf.join(", "):"none"}
 
-Be specific — use real account name, real numbers, real workflow names.`;
+Return ONLY the JSON. No other text.`;
 
-  const {text,loading,error}=useAI(prompt);
-  const [parsed,setParsed]=useState(null);
-  const [parseErr,setParseErr]=useState(false);
+  const [result,setResult]=useState(null);
+  const [loading,setLoading]=useState(true);
+  const [errMsg,setErrMsg]=useState(null);
+  const fired=useRef(false);
 
   useEffect(()=>{
-    if(!text)return;
-    try{
-      const clean=text.replace(/```json|```/g,"").trim();
-      setParsed(JSON.parse(clean));
-    }catch{setParseErr(true)}
-  },[text]);
+    if(fired.current)return;
+    fired.current=true;
+    callAI(prompt)
+      .then(raw=>{
+        const cleaned=raw.replace(/```json/g,"").replace(/```/g,"").trim();
+        const firstBrace=cleaned.indexOf("{");
+        const lastBrace=cleaned.lastIndexOf("}");
+        if(firstBrace===-1||lastBrace===-1)throw new Error("No JSON object found in response");
+        const jsonStr=cleaned.slice(firstBrace,lastBrace+1);
+        const parsed=JSON.parse(jsonStr);
+        setResult(parsed);setLoading(false);
+      })
+      .catch(e=>{
+        setErrMsg(e.message||"Unknown error");
+        setLoading(false);
+      });
+  },[]);
 
   if(loading)return(
-    <div style={{background:"#fff",border:"0.5px solid #e5e7eb",borderRadius:14,padding:"20px 24px"}}>
-      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:16}}>
-        <div style={{width:7,height:7,borderRadius:"50%",background:"#f59e0b",animation:"pulse 2s infinite"}}/>
-        <span style={{fontSize:12,fontWeight:600,color:"#374151",letterSpacing:.3}}>🤖 Felicity CS Copilot</span>
-        <span style={{fontSize:11,color:"#9ca3af"}}>Analysing account…</span>
+    <div style={{background:"#fff",border:"0.5px solid #e5e7eb",borderRadius:14,padding:"24px"}}>
+      <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:20}}>
+        <div style={{width:32,height:32,borderRadius:8,background:"linear-gradient(135deg,#3b82f6,#8b5cf6)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:16}}>🤖</div>
+        <div>
+          <div style={{fontSize:13,fontWeight:600,color:"#0f1117"}}>Felicity CS Copilot</div>
+          <div style={{fontSize:11,color:"#9ca3af"}}>Analysing {c.name}…</div>
+        </div>
+        <div style={{marginLeft:"auto",display:"flex",gap:3}}>
+          {[0,1,2].map(i=><div key={i} style={{width:6,height:6,borderRadius:"50%",background:"#3b82f6",animation:`pulse 1.2s ${i*0.2}s infinite`}}/>)}
+        </div>
       </div>
-      <div style={{display:"flex",flexDirection:"column",gap:8}}>
-        {[90,70,80,55,75,60].map((w,i)=>(
-          <div key={i} style={{height:13,borderRadius:4,background:"linear-gradient(90deg,#f0f2f5 25%,#e8eaed 50%,#f0f2f5 75%)",backgroundSize:"200% 100%",animation:"shimmer 1.4s infinite",width:`${w}%`}}/>
+      <div style={{display:"flex",flexDirection:"column",gap:10}}>
+        {[95,80,70,88,60,75,65].map((w,i)=>(
+          <div key={i} style={{height:13,borderRadius:6,background:"linear-gradient(90deg,#f0f2f5 25%,#e8eaed 50%,#f0f2f5 75%)",backgroundSize:"200% 100%",animation:"shimmer 1.4s infinite",width:w+"%"}}/>
         ))}
       </div>
     </div>
   );
 
-  if(error||parseErr)return(
-    <div style={{background:"#fff",border:"0.5px solid #e5e7eb",borderRadius:14,padding:"20px 24px"}}>
-      <div style={{fontSize:12,fontWeight:600,color:"#374151",marginBottom:8}}>🤖 Felicity CS Copilot</div>
-      <p style={{fontSize:13,color:"#dc2626"}}>Could not load AI analysis. Ensure ANTHROPIC_API_KEY is set in Netlify environment variables.</p>
+  if(errMsg)return(
+    <div style={{background:"#fef2f2",border:"0.5px solid #fca5a5",borderRadius:14,padding:"20px 24px"}}>
+      <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:8}}>
+        <div style={{width:32,height:32,borderRadius:8,background:"linear-gradient(135deg,#3b82f6,#8b5cf6)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:16}}>🤖</div>
+        <div style={{fontSize:13,fontWeight:600,color:"#0f1117"}}>Felicity CS Copilot</div>
+      </div>
+      <p style={{fontSize:13,color:"#dc2626",marginBottom:4}}>Felicity could not generate analysis.</p>
+      <p style={{fontSize:12,color:"#9ca3af",fontFamily:"monospace"}}>{errMsg}</p>
+      <p style={{fontSize:12,color:"#6b7280",marginTop:8}}>Check: 1) ANTHROPIC_API_KEY is set in Netlify environment variables. 2) You have triggered a redeploy after setting the key.</p>
     </div>
   );
 
-  if(!parsed)return null;
-
   return(
     <div style={{display:"flex",flexDirection:"column",gap:12}}>
-      {/* Header */}
-      <div style={{background:"#fff",border:`0.5px solid ${h.border}`,borderLeft:`3px solid ${h.color}`,borderRadius:14,padding:"18px 22px"}}>
-        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
-          <div style={{width:7,height:7,borderRadius:"50%",background:"#3b82f6",animation:"pulse 2s infinite"}}/>
-          <span style={{fontSize:12,fontWeight:600,color:"#374151",letterSpacing:.3}}>🤖 Felicity CS Copilot</span>
-          <span style={{fontSize:11,padding:"2px 7px",borderRadius:20,background:h.bg,color:h.color,fontWeight:500}}>{h.label} · {c.score}/100</span>
+      {/* Felicity header + status */}
+      <div style={{background:"#fff",border:`1.5px solid ${h.color}22`,borderLeft:`3px solid ${h.color}`,borderRadius:14,padding:"20px 22px"}}>
+        <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:12}}>
+          <div style={{width:36,height:36,borderRadius:10,background:"linear-gradient(135deg,#3b82f6,#8b5cf6)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,flexShrink:0}}>🤖</div>
+          <div style={{flex:1}}>
+            <div style={{fontSize:14,fontWeight:600,color:"#0f1117"}}>Felicity CS Copilot</div>
+            <div style={{fontSize:11,color:"#9ca3af"}}>Account Status: <span style={{fontWeight:600,color:h.color}}>{h.label} ({c.score}/100)</span></div>
+          </div>
+          <div style={{width:7,height:7,borderRadius:"50%",background:"#3b82f6",animation:"pulse 2s infinite",flexShrink:0}}/>
         </div>
-        <div style={{fontSize:14,color:"#0f1117",fontWeight:500,lineHeight:1.5}}>{parsed.status_line}</div>
+        <div style={{fontSize:14,color:"#0f1117",lineHeight:1.6,marginBottom:result.why_score_changed?10:0}}>{result.status_line}</div>
+        {result.why_score_changed&&<div style={{fontSize:13,color:"#6b7280",lineHeight:1.6,borderTop:"0.5px solid #f3f4f6",paddingTop:10,marginTop:4}}>{result.why_score_changed}</div>}
       </div>
 
+      {/* Drivers + Impact */}
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
-        {/* Drivers */}
         <div style={{background:"#fff",border:"0.5px solid #e5e7eb",borderRadius:12,padding:"16px 18px"}}>
-          <div style={{fontSize:12,fontWeight:600,color:"#dc2626",marginBottom:10}}>Primary drivers</div>
-          <div style={{display:"flex",flexDirection:"column",gap:6}}>
-            {parsed.primary_drivers?.map((d,i)=>(
-              <div key={i} style={{display:"flex",gap:8,alignItems:"flex-start"}}>
-                <span style={{color:"#dc2626",fontSize:14,flexShrink:0,marginTop:1}}>•</span>
-                <span style={{fontSize:13,color:"#374151",lineHeight:1.5}}>{d}</span>
+          <div style={{fontSize:12,fontWeight:600,color:"#dc2626",marginBottom:10,display:"flex",alignItems:"center",gap:6}}>
+            <span>⚠</span> Primary risk drivers
+          </div>
+          <div style={{display:"flex",flexDirection:"column",gap:7}}>
+            {(result.primary_drivers||[]).map((d,i)=>(
+              <div key={i} style={{display:"flex",gap:8,alignItems:"flex-start",padding:"6px 8px",background:"#fef9f9",borderRadius:7}}>
+                <span style={{color:"#dc2626",fontWeight:700,flexShrink:0,fontSize:12}}>→</span>
+                <span style={{fontSize:12,color:"#374151",lineHeight:1.5}}>{d}</span>
               </div>
             ))}
           </div>
         </div>
-        {/* Impact */}
         <div style={{background:"#fff",border:"0.5px solid #e5e7eb",borderRadius:12,padding:"16px 18px"}}>
-          <div style={{fontSize:12,fontWeight:600,color:"#d97706",marginBottom:10}}>Potential business impact</div>
-          <div style={{display:"flex",flexDirection:"column",gap:6}}>
-            {parsed.business_impact?.map((d,i)=>(
-              <div key={i} style={{display:"flex",gap:8,alignItems:"flex-start"}}>
-                <span style={{color:"#d97706",fontSize:14,flexShrink:0,marginTop:1}}>•</span>
-                <span style={{fontSize:13,color:"#374151",lineHeight:1.5}}>{d}</span>
+          <div style={{fontSize:12,fontWeight:600,color:"#d97706",marginBottom:10,display:"flex",alignItems:"center",gap:6}}>
+            <span>📊</span> Potential business impact
+          </div>
+          <div style={{display:"flex",flexDirection:"column",gap:7}}>
+            {(result.business_impact||[]).map((d,i)=>(
+              <div key={i} style={{display:"flex",gap:8,alignItems:"flex-start",padding:"6px 8px",background:"#fffdf5",borderRadius:7}}>
+                <span style={{color:"#d97706",fontWeight:700,flexShrink:0,fontSize:12}}>→</span>
+                <span style={{fontSize:12,color:"#374151",lineHeight:1.5}}>{d}</span>
               </div>
             ))}
           </div>
@@ -584,33 +619,39 @@ Be specific — use real account name, real numbers, real workflow names.`;
 
       {/* Actions */}
       <div style={{background:"#fff",border:"0.5px solid #e5e7eb",borderRadius:12,padding:"16px 18px"}}>
-        <div style={{fontSize:12,fontWeight:600,color:"#16a34a",marginBottom:10}}>Recommended actions</div>
-        <div style={{display:"flex",flexDirection:"column",gap:7}}>
-          {parsed.recommended_actions?.map((a,i)=>(
-            <div key={i} style={{display:"flex",gap:10,alignItems:"flex-start"}}>
-              <div style={{width:20,height:20,borderRadius:"50%",background:"#f0fdf4",border:"0.5px solid #86efac",display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,fontWeight:600,color:"#16a34a",flexShrink:0}}>{i+1}</div>
-              <span style={{fontSize:13,color:"#374151",lineHeight:1.5,paddingTop:1}}>{a}</span>
+        <div style={{fontSize:12,fontWeight:600,color:"#16a34a",marginBottom:12,display:"flex",alignItems:"center",gap:6}}>
+          <span>✓</span> Recommended actions
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+          {(result.recommended_actions||[]).map((a,i)=>(
+            <div key={i} style={{display:"flex",gap:10,alignItems:"flex-start",padding:"8px 10px",background:"#f0fdf4",borderRadius:8,border:"0.5px solid #86efac"}}>
+              <div style={{width:20,height:20,borderRadius:"50%",background:"#16a34a",display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,fontWeight:700,color:"#fff",flexShrink:0}}>{i+1}</div>
+              <span style={{fontSize:12,color:"#374151",lineHeight:1.5,paddingTop:1}}>{a}</span>
             </div>
           ))}
         </div>
       </div>
 
-      {/* Customer email */}
+      {/* Email */}
       <div style={{background:"#fff",border:"0.5px solid #e5e7eb",borderRadius:12,padding:"16px 18px"}}>
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
-          <div style={{fontSize:12,fontWeight:600,color:"#374151"}}>Customer communication</div>
-          <CopyButton text={parsed.customer_email||""}/>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+          <div style={{fontSize:12,fontWeight:600,color:"#374151",display:"flex",alignItems:"center",gap:6}}>
+            <span>✉</span> Draft customer communication
+          </div>
+          <CopyButton text={result.customer_email||""}/>
         </div>
-        <div style={{background:"#f9fafb",borderRadius:8,padding:"12px 14px",fontSize:13,color:"#374151",lineHeight:1.7,whiteSpace:"pre-wrap",border:"0.5px solid #e5e7eb"}}>{parsed.customer_email}</div>
+        <div style={{background:"#f9fafb",borderRadius:8,padding:"14px 16px",fontSize:13,color:"#374151",lineHeight:1.8,whiteSpace:"pre-wrap",border:"0.5px solid #e5e7eb",fontFamily:"Georgia,serif"}}>{result.customer_email}</div>
       </div>
 
       {/* Internal note */}
       <div style={{background:"#fff",border:"0.5px solid #e5e7eb",borderRadius:12,padding:"16px 18px"}}>
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
-          <div style={{fontSize:12,fontWeight:600,color:"#374151"}}>Internal product note</div>
-          <CopyButton text={parsed.internal_note||""}/>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+          <div style={{fontSize:12,fontWeight:600,color:"#374151",display:"flex",alignItems:"center",gap:6}}>
+            <span>🔧</span> Internal product / engineering note
+          </div>
+          <CopyButton text={result.internal_note||""}/>
         </div>
-        <div style={{background:"#f9fafb",borderRadius:8,padding:"12px 14px",fontSize:13,color:"#374151",lineHeight:1.7,whiteSpace:"pre-wrap",border:"0.5px solid #e5e7eb"}}>{parsed.internal_note}</div>
+        <div style={{background:"#f9fafb",borderRadius:8,padding:"14px 16px",fontSize:13,color:"#374151",lineHeight:1.7,whiteSpace:"pre-wrap",border:"0.5px solid #e5e7eb"}}>{result.internal_note}</div>
       </div>
     </div>
   );
