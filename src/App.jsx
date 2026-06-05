@@ -170,51 +170,40 @@ function StatCardModal({type,customers,onClose}){
 }
 
 // AI — uses non-streaming fetch since Netlify Functions don't support streaming
-async function callAI(prompt){
-  const r=await fetch("/api/ai",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({prompt,stream:false})});
-  if(!r.ok){const e=await r.text();throw new Error("HTTP "+r.status+": "+e);}
-  const data=await r.json();
-  if(data.error)throw new Error(data.error);
-  return data.content?.map(i=>i.text||"").join("")||"";
+function generateBriefing(customers) {
+  const critical = customers.filter(c => c.bucket === "critical");
+  const atRisk = customers.filter(c => c.bucket === "at_risk");
+  const expansion = customers.filter(c => c.bucket === "expansion");
+  const totalARR = customers.reduce((s,c) => s+c.arr, 0);
+  const riskARR = [...critical,...atRisk].reduce((s,c) => s+c.arr, 0);
+  const improving = customers.filter(c => c.trend === "improving").length;
+  const declining = customers.filter(c => c.trend === "declining").length;
+  const avgScore = Math.round(customers.reduce((s,c) => s+c.score, 0)/customers.length);
+  const topCritical = critical.sort((a,b) => a.score-b.score)[0];
+  const topRenewal = atRisk.filter(c => c.renewalDays <= 30).sort((a,b) => a.renewalDays-b.renewalDays)[0] || atRisk[0];
+  const topExpansion = expansion.sort((a,b) => b.score-a.score)[0];
+
+  const lines = [];
+  lines.push(`Good morning, Lola. You're managing a portfolio of 500 customers across £${(totalARR/1000000).toFixed(1)}M ARR, with an average portfolio health score of ${avgScore}/100.`);
+
+  if (critical.length > 0 && topCritical) {
+    const drop = topCritical.prevScore - topCritical.score;
+    lines.push(`${critical.length} account${critical.length>1?"s are":"is"} Critical today — your most urgent is ${topCritical.name}, which has declined ${drop} health points over the past 7 days due to ${topCritical.escalations} open escalations and ${topCritical.failedMessages} failed message deliveries.`);
+  }
+
+  if (atRisk.length > 0 && topRenewal) {
+    lines.push(`${atRisk.length} accounts are At Risk, representing £${Math.round(riskARR/1000)}k ARR. ${topRenewal.name} is the highest priority — renewal is in ${topRenewal.renewalDays} days and the account is currently ${getHealthLabel(topRenewal.score).label} at ${topRenewal.score}/100.`);
+  }
+
+  if (topExpansion) {
+    lines.push(`On the positive side, ${expansion.length} accounts are Expansion Ready. ${topExpansion.name} leads with a score of ${topExpansion.score}/100 and NPS of ${topExpansion.nps} — this is a strong candidate for an upsell conversation this week.`);
+  }
+
+  lines.push(`Portfolio momentum: ${improving} accounts are improving and ${declining} are declining. Your recommended focus today is ${topCritical ? topCritical.name : atRisk[0]?.name || "your at-risk accounts"}.`);
+
+  return lines.join(" ");
 }
 
-function useAI(prompt){
-  const [text,setText]=useState("");
-  const [loading,setLoading]=useState(true);
-  const [error,setError]=useState(null);
-  const keyRef=useRef(0);
-  useEffect(()=>{
-    if(!prompt)return;
-    const myKey=++keyRef.current;
-    setText("");setLoading(true);setError(null);
-    callAI(prompt)
-      .then(t=>{if(myKey===keyRef.current){setText(t);setLoading(false);}})
-      .catch(e=>{if(myKey===keyRef.current){setError(e.message||"AI error");setLoading(false);}});
-  },[prompt]);
-  return{text,loading,error};
-}
-
-function AIPanel({prompt,title="AI Copilot"}){
-  const {text,loading,error}=useAI(prompt);
-  return(
-    <div style={{background:"#fff",border:"0.5px solid #e5e7eb",borderRadius:14,padding:"20px 24px",boxShadow:"0 1px 3px rgba(0,0,0,.04)"}}>
-      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:14}}>
-        <div style={{width:7,height:7,borderRadius:"50%",background:loading?"#f59e0b":"#3b82f6",animation:"pulse 2s infinite"}}/>
-        <span style={{fontSize:11,fontWeight:600,color:"#3b82f6",letterSpacing:.5,textTransform:"uppercase"}}>{title}</span>
-        {loading&&<span style={{fontSize:11,color:"#9ca3af",marginLeft:4}}>Generating…</span>}
-      </div>
-      {loading&&(
-        <div style={{display:"flex",flexDirection:"column",gap:8}}>
-          {[80,65,72,50].map((w,i)=>(
-            <div key={i} style={{height:14,borderRadius:4,background:"linear-gradient(90deg,#f0f2f5 25%,#e8eaed 50%,#f0f2f5 75%)",backgroundSize:"200% 100%",animation:"shimmer 1.4s infinite",width:`${w}%`}}/>
-          ))}
-        </div>
-      )}
-      {error&&<p style={{fontSize:13,color:"#dc2626"}}>Could not load AI insight. Check your API key is set in Netlify environment variables and redeploy.</p>}
-      {!loading&&!error&&<div style={{fontSize:13,lineHeight:1.8,color:"#1f2937",whiteSpace:"pre-wrap"}}>{text}</div>}
-    </div>
-  );
-}
 
 function Dashboard({customers,onSelectCustomer}){
   const [modalType,setModalType]=useState(null);
@@ -238,23 +227,9 @@ function Dashboard({customers,onSelectCustomer}){
   const seen=new Set();
   const deduped=priorities.filter(c=>{if(seen.has(c.id))return false;seen.add(c.id);return true}).slice(0,8);
 
-  const briefPrompt=`You are an AI copilot for a Customer Success Manager named Lola at LightWork AI, a property management automation SaaS platform.
+  const briefing = generateBriefing(customers);
 
-Write a concise morning briefing (5-6 sentences) for Lola. Be specific with account names and real numbers. Plain English, no bullet points, conversational and actionable.
-
-Portfolio data:
-- 500 total customers, £${(totalARR/1000000).toFixed(1)}M total ARR
-- ${critical.length} Critical accounts (e.g. ${critical.slice(0,2).map(c=>c.name).join(", ")})
-- ${atRisk.length} At Risk accounts, £${Math.round(riskARR/1000)}k ARR at risk
-- ${expansion.length} Expansion Ready accounts, £${Math.round(expARR/1000)}k pipeline
-- Portfolio health score: ${avgScore}/100 · ${improving} improving · ${declining} declining
-- Top critical: ${critical[0]?.name} (score ${critical[0]?.score}, declined ${Math.abs((critical[0]?.score||0)-(critical[0]?.prevScore||0))} pts, ${critical[0]?.escalations} escalations, ${critical[0]?.failedMessages} failed messages)
-- Top renewal risk: ${atRisk.filter(c=>c.renewalDays<=30)[0]?.name||atRisk[0]?.name} — renewal in ${atRisk.filter(c=>c.renewalDays<=30)[0]?.renewalDays||atRisk[0]?.renewalDays} days
-- Top expansion: ${expansion[0]?.name} — score ${expansion[0]?.score}, NPS ${expansion[0]?.nps}
-
-Start with "Good morning, Lola." Give the full briefing as flowing prose. End with one specific recommended focus for today.`;
-
-  const statCards=[
+    const statCards=[
     {type:"arr",label:"Portfolio ARR",val:`£${(totalARR/1000000).toFixed(1)}M`,sub:"total managed · click for breakdown",color:"#0f1117"},
     {type:"risk",label:"ARR at risk",val:`£${Math.round(riskARR/1000)}k`,sub:`${critical.length} critical · ${atRisk.length} at risk`,color:"#dc2626",alert:true},
     {type:"health",label:"Portfolio health",val:`${avgScore}`,sub:`${improving} improving · ${declining} declining`,color:"#0f1117"},
@@ -265,7 +240,14 @@ Start with "Good morning, Lola." Give the full briefing as flowing prose. End wi
     <div style={{display:"flex",flexDirection:"column",gap:20}}>
       {modalType&&<StatCardModal type={modalType} customers={customers} onClose={()=>setModalType(null)}/>}
 
-      <AIPanel prompt={briefPrompt} title="AI Daily Briefing"/>
+      <div style={{background:"#fff",border:"0.5px solid #e5e7eb",borderRadius:14,padding:"20px 24px",boxShadow:"0 1px 3px rgba(0,0,0,.04)"}}>
+        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:14}}>
+          <div style={{width:7,height:7,borderRadius:"50%",background:"#3b82f6"}}/>
+          <span style={{fontSize:11,fontWeight:600,color:"#3b82f6",letterSpacing:.5,textTransform:"uppercase"}}>AI Daily Briefing</span>
+          <span style={{fontSize:10,color:"#9ca3af",marginLeft:"auto"}}>Powered by Felicity</span>
+        </div>
+        <div style={{fontSize:14,color:"#1f2937",lineHeight:1.8}}>{briefing}</div>
+      </div>
 
       {/* Stat cards */}
       <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10}}>
@@ -389,6 +371,230 @@ Start with "Good morning, Lola." Give the full briefing as flowing prose. End wi
   );
 }
 
+
+// ── Felicity Engine — deterministic AI generation from account metrics ───────
+const FELICITY = {
+
+  generate(c) {
+    const h = getHealthLabel(c.score);
+    const scoreDrop = c.prevScore - c.score;
+    const scoreChange = scoreDrop > 0 ? `declined ${scoreDrop} points` : scoreDrop < 0 ? `improved ${Math.abs(scoreDrop)} points` : "remained stable";
+    const lowWf = WORKFLOWS.filter(w => c.wfAdoption[w] < 40).sort((a,b) => c.wfAdoption[a]-c.wfAdoption[b]);
+    const highWf = WORKFLOWS.filter(w => c.wfAdoption[w] >= 70);
+    const isRenewalRisk = c.renewalDays <= 60;
+    const isCritical = c.bucket === "critical";
+    const isExpansion = c.bucket === "expansion";
+    const isAtRisk = c.bucket === "at_risk";
+
+    return {
+      status_line: this._statusLine(c, h, scoreChange),
+      why_score_changed: this._whyChanged(c, scoreDrop, lowWf, highWf),
+      primary_drivers: this._drivers(c, lowWf),
+      business_impact: this._impact(c, isRenewalRisk),
+      recommended_actions: this._actions(c, lowWf, isRenewalRisk),
+      customer_email: this._email(c, h, lowWf, highWf),
+      internal_note: this._internalNote(c, lowWf),
+    };
+  },
+
+  _statusLine(c, h, scoreChange) {
+    const arr = `£${(c.arr/1000).toFixed(0)}k ARR`;
+    if (c.bucket === "critical") {
+      return `${c.name} is ${h.label} at ${c.score}/100 — the account has ${scoreChange} over the past 7 days and requires immediate intervention to prevent churn of ${arr}.`;
+    }
+    if (c.bucket === "at_risk") {
+      return `${c.name} is ${h.label} at ${c.score}/100 — the account has ${scoreChange} and is showing early warning signs that need addressing before the ${c.renewalDays}-day renewal window closes.`;
+    }
+    if (c.bucket === "expansion") {
+      return `${c.name} is ${h.label} at ${c.score}/100 — this account has ${scoreChange} and is demonstrating strong platform adoption, making it a prime candidate for expansion conversation.`;
+    }
+    return `${c.name} is ${h.label} at ${c.score}/100 — the account has ${scoreChange} and is performing within expected parameters with ${arr} under management.`;
+  },
+
+  _whyChanged(c, scoreDrop, lowWf, highWf) {
+    const parts = [];
+    if (c.escalations > 8) parts.push(`escalation volume has reached ${c.escalations} open tickets, significantly above the healthy threshold of 3`);
+    else if (c.escalations > 4) parts.push(`escalation volume has risen to ${c.escalations} open tickets, indicating growing operational friction`);
+    if (c.failedMessages > 5) parts.push(`${c.failedMessages} failed message deliveries have been detected this week, directly impacting tenant response times`);
+    else if (c.failedMessages > 2) parts.push(`${c.failedMessages} failed message deliveries have been logged, suggesting delivery reliability issues`);
+    if (lowWf.length >= 3) parts.push(`adoption across ${lowWf.slice(0,2).join(" and ")} workflows remains critically low at ${c.wfAdoption[lowWf[0]]}% and ${c.wfAdoption[lowWf[1]]}% respectively`);
+    else if (lowWf.length > 0) parts.push(`${lowWf[0]} workflow adoption sits at only ${c.wfAdoption[lowWf[0]]}%, limiting the customer's realised value from the platform`);
+    if (c.tenantSat < 55) parts.push(`tenant satisfaction has dropped to ${c.tenantSat}%, which is below the acceptable threshold of 65%`);
+    if (highWf.length >= 4) parts.push(`strong adoption across ${highWf.length} of 5 workflows is driving positive engagement signals`);
+    if (c.nps >= 50) parts.push(`NPS of ${c.nps} reflects strong customer advocacy`);
+    if (!parts.length) {
+      if (scoreDrop > 0) return `The score decline reflects a combination of sub-threshold performance across multiple categories. No single critical failure has been identified, but the aggregate trend warrants closer monitoring over the next 14 days.`;
+      return `The account is performing consistently across all monitored categories. Onboarding completion, adoption rates, and support metrics are all within healthy ranges for an account at ${c.daysLive} days live.`;
+    }
+    const sentence1 = `The current score reflects that ${parts[0]}.`;
+    const sentence2 = parts[1] ? ` Additionally, ${parts[1]}.` : "";
+    const sentence3 = parts[2] ? ` ${parts[2].charAt(0).toUpperCase() + parts[2].slice(1)}.` : "";
+    return sentence1 + sentence2 + sentence3;
+  },
+
+  _drivers(c, lowWf) {
+    const drivers = [];
+    if (c.escalations > 8) drivers.push(`Escalation volume at ${c.escalations} — ${Math.round(c.escalations/3)}× above healthy baseline of 3`);
+    else if (c.escalations > 3) drivers.push(`Escalation volume elevated at ${c.escalations} open tickets — trending upward`);
+    if (c.failedMessages > 5) drivers.push(`${c.failedMessages} failed message deliveries detected — tenant communication reliability compromised`);
+    else if (c.failedMessages > 2) drivers.push(`${c.failedMessages} failed message deliveries logged — requires investigation`);
+    if (c.openIssues > 4) drivers.push(`${c.openIssues} unresolved support issues open — SLA breach risk increasing`);
+    if (lowWf.length > 0) drivers.push(`${lowWf[0]} workflow at ${c.wfAdoption[lowWf[0]]}% adoption — core use case underutilised`);
+    if (lowWf.length > 1) drivers.push(`${lowWf[1]} workflow at ${c.wfAdoption[lowWf[1]]}% adoption — automation value not being realised`);
+    if (c.tenantSat < 55) drivers.push(`Tenant satisfaction at ${c.tenantSat}% — below 65% acceptable threshold`);
+    else if (c.tenantSat < 65) drivers.push(`Tenant satisfaction at ${c.tenantSat}% — approaching risk threshold`);
+    if (c.loginFreq === "Rarely" || c.loginFreq === "Infrequent") drivers.push(`Login frequency is ${c.loginFreq.toLowerCase()} — low platform engagement signal`);
+    if (c.renewalDays <= 45) drivers.push(`Renewal in ${c.renewalDays} days — insufficient time to recover health score before commercial conversation`);
+    if (c.trainingComplete < 50) drivers.push(`Training completion at ${c.trainingComplete}% — team not fully equipped to use the platform`);
+    if (c.nps < 0) drivers.push(`NPS of ${c.nps} — active detractors present in the account`);
+    // For expansion accounts, show positive drivers
+    if (c.bucket === "expansion") {
+      if (drivers.length === 0) {
+        drivers.push(`All 5 LightWork workflows adopted above 70% — maximum platform utilisation`);
+        drivers.push(`NPS of +${c.nps} — strong advocacy and referral potential`);
+        drivers.push(`Tenant satisfaction at ${c.tenantSat}% — well above industry benchmark`);
+        drivers.push(`Login frequency: ${c.loginFreq} — team fully embedded in the platform`);
+      }
+    }
+    return drivers.slice(0, 4);
+  },
+
+  _impact(c, isRenewalRisk) {
+    const impacts = [];
+    if (c.bucket === "critical") {
+      impacts.push(`Churn risk is high — unresolved issues at renewal could result in loss of £${(c.arr/1000).toFixed(0)}k ARR`);
+      impacts.push(`Tenant dissatisfaction is likely spreading — unresolved escalations create negative word-of-mouth in the ${c.region} market`);
+      impacts.push(`Support burden is increasing — ${c.escalations} open escalations is consuming disproportionate CSM and engineering time`);
+    } else if (c.bucket === "at_risk") {
+      impacts.push(isRenewalRisk
+        ? `Renewal in ${c.renewalDays} days — current trajectory makes a successful renewal conversation difficult`
+        : `If current trend continues, the account may reach Critical status within 14–21 days`);
+      impacts.push(`Low workflow adoption means the customer is not realising full ROI from the platform — increasing perceived switching cost risk`);
+      impacts.push(`Declining tenant satisfaction could trigger direct complaints to building management, escalating beyond the CS team`);
+    } else if (c.bucket === "expansion") {
+      impacts.push(`Expansion potential estimated at 15–25% ARR uplift based on current adoption trajectory`);
+      impacts.push(`High NPS of +${c.nps} makes this account a strong reference customer and referral source`);
+      impacts.push(`Full workflow adoption demonstrates platform stickiness — renewal is low risk and expansion is the right commercial focus`);
+    } else {
+      impacts.push(`Account is stable but monitoring is required to prevent drift into At Risk territory`);
+      impacts.push(`Partial workflow adoption means the customer has not yet realised full platform value — expansion conversation is premature`);
+      impacts.push(isRenewalRisk
+        ? `Renewal in ${c.renewalDays} days — account needs to improve to Healthy status before commercial conversation`
+        : `No immediate commercial risk identified — maintain regular touchpoints and drive adoption`);
+    }
+    return impacts.slice(0, 3);
+  },
+
+  _actions(c, lowWf, isRenewalRisk) {
+    const actions = [];
+    if (c.bucket === "critical" || c.escalations > 6) {
+      actions.push(`Schedule emergency recovery call with ${c.name} this week — bring Engineering lead to address technical issues`);
+    } else if (c.bucket === "at_risk") {
+      actions.push(`Book a health review call with ${c.name} within 5 business days — focus on adoption gaps and support backlog`);
+    } else if (c.bucket === "expansion") {
+      actions.push(`Schedule a QBR with ${c.name} to present adoption data and introduce expansion use cases`);
+    } else {
+      actions.push(`Schedule monthly check-in with ${c.name} to review platform performance and gather feedback`);
+    }
+    if (c.failedMessages > 3) {
+      actions.push(`Escalate ${c.failedMessages} failed message deliveries to Engineering immediately — review delivery logs for ${c.name}`);
+    }
+    if (lowWf.length > 0) {
+      actions.push(`Run ${lowWf[0]} workflow activation session with ${c.name}'s operations team — target 60% adoption within 30 days`);
+    }
+    if (lowWf.length > 1) {
+      actions.push(`Create a ${lowWf[1]} onboarding plan — assign a dedicated training session and set adoption milestone`);
+    }
+    if (isRenewalRisk && c.bucket !== "expansion") {
+      actions.push(`Prepare renewal risk summary for ${c.owner} — flag to leadership given ${c.renewalDays}-day window and current health score`);
+    }
+    if (c.tenantSat < 60) {
+      actions.push(`Share tenant satisfaction data with ${c.name}'s team and co-create a resident experience improvement plan`);
+    }
+    if (c.bucket === "expansion") {
+      actions.push(`Prepare upsell proposal — ${c.name} is expansion-ready with strong NPS (${c.nps}) and full workflow adoption`);
+      actions.push(`Request a case study or testimonial from ${c.name} — account is performing above benchmark`);
+    }
+    if (c.openIssues > 3) {
+      actions.push(`Clear ${c.openIssues} open support issues before next client touchpoint — assign to on-call engineer`);
+    }
+    return actions.slice(0, 4);
+  },
+
+  _email(c, h, lowWf, highWf) {
+    const isGood = c.bucket === "expansion" || c.bucket === "healthy";
+    const greeting = `Subject: ${isGood ? `${c.name} — Performance Update & Next Steps` : `${c.name} — Account Review & Action Plan`}
+
+Hi ${c.name.split(" ")[0]} team,`;
+
+    if (c.bucket === "expansion") {
+      return `${greeting}
+
+I wanted to reach out to share some great news — your team has made excellent progress on the LightWork platform. Across your portfolio of ${c.units.toLocaleString()} units, you've adopted ${highWf.length} of our 5 core workflows and your tenant satisfaction sits at ${c.tenantSat}%.
+
+Your current platform health score is ${c.score}/100, which puts you in our top tier of customers. Given this strong foundation, I'd love to schedule a session to walk through some advanced features and expansion opportunities that I think would add significant value to your operations.
+
+Would you be available for a 30-minute call in the next two weeks? I'll come prepared with a tailored roadmap based on your portfolio data.
+
+Looking forward to continuing to work together.
+
+Best regards,
+${c.owner}
+Customer Success Manager, LightWork AI`;
+    }
+
+    if (c.bucket === "critical" || c.bucket === "at_risk") {
+      const issue1 = c.failedMessages > 3 ? `message delivery reliability` : c.escalations > 5 ? `escalation volume` : `workflow adoption`;
+      const issue2 = lowWf.length > 0 ? `${lowWf[0]} workflow adoption (currently at ${c.wfAdoption[lowWf[0]]}%)` : `tenant satisfaction metrics`;
+      return `${greeting}
+
+I wanted to reach out proactively as I've been reviewing your account data and noticed some trends I'd like to discuss with you directly.
+
+Specifically, I've identified increased ${issue1} and want to make sure we're giving your team the support needed to resolve this quickly. I've also noted that ${issue2} is an area where I believe we can drive meaningful improvement together.
+
+I'd like to propose a focused review session this week where we can walk through your current platform performance, address any outstanding issues, and put a clear action plan in place. I want to make sure your team is getting full value from LightWork.
+
+Could you share your availability for a 45-minute call in the next 3–5 days? I'll prepare a full performance summary in advance.
+
+Apologies if any of these issues have caused friction — resolving them is my immediate priority.
+
+Best regards,
+${c.owner}
+Customer Success Manager, LightWork AI`;
+    }
+
+    return `${greeting}
+
+I hope you're well. I'm reaching out for our regular performance check-in on your LightWork account.
+
+Your platform health score is currently ${c.score}/100, which reflects solid performance across your portfolio of ${c.units.toLocaleString()} units. ${lowWf.length > 0 ? `One area I'd like to focus on in our next session is ${lowWf[0]} — increasing adoption here would unlock additional automation value for your team.` : `Your team is making great use of the platform across all core workflows.`}
+
+I'd love to connect in the next couple of weeks for a quick check-in. Would a 30-minute slot work for you?
+
+Best regards,
+${c.owner}
+Customer Success Manager, LightWork AI`;
+  },
+
+  _internalNote(c, lowWf) {
+    const issues = [];
+    if (c.failedMessages > 3) issues.push(`${c.failedMessages} failed message deliveries logged this week — delivery pipeline requires investigation`);
+    if (c.escalations > 6) issues.push(`${c.escalations} open escalations — above critical threshold, investigate for systemic issue`);
+    if (c.openIssues > 3) issues.push(`${c.openIssues} unresolved support tickets outstanding`);
+    if (lowWf.length > 0) issues.push(`${lowWf[0]} workflow adoption at ${c.wfAdoption[lowWf[0]]}% — possible UX or configuration barrier`);
+    if (c.trainingComplete < 50) issues.push(`training completion at ${c.trainingComplete}% — team may lack product knowledge to adopt advanced features`);
+
+    if (!issues.length) {
+      return `${c.name} (${c.segment}, ${c.units.toLocaleString()} units, ${c.region}) is performing well with a health score of ${c.score}/100. No active technical issues flagged. Workflow adoption is strong across all five LightWork workflows. No engineering action required at this time — account is being monitored on a standard 30-day cycle.`;
+    }
+
+    const primaryIssue = issues[0];
+    const secondary = issues.slice(1, 3).join("; and ");
+    return `${c.name} (${c.segment}, ${c.units.toLocaleString()} units, ${c.region}) has a health score of ${c.score}/100 (↓${c.prevScore - c.score} pts over 7 days). Primary technical concern: ${primaryIssue}. ${secondary ? `Additionally: ${secondary}. ` : ""}Recommend engineering review of delivery infrastructure for this account. CSM (${c.owner}) has been briefed and a recovery call is being scheduled — please prioritise any infrastructure investigation before that session.`;
+  }
+};
+// ─────────────────────────────────────────────────────────────────────────────
+
 function CopyButton({text}){
   const [copied,setCopied]=useState(false);
   const copy=()=>{navigator.clipboard.writeText(text).then(()=>{setCopied(true);setTimeout(()=>setCopied(false),2000)}).catch(()=>{})};
@@ -477,103 +683,12 @@ function AutomationOpportunities({c}){
 }
 
 function FelicityCopilot({c}){
-  const h=getHealthLabel(c.score);
-  const wfAdopted=Object.values(c.wfAdoption).filter(v=>v>=70).length;
-  const scoreDrop=c.prevScore-c.score;
-  const lowWf=WORKFLOWS.filter(w=>c.wfAdoption[w]<30);
-
-  const prompt=`You are Felicity, an AI-powered Customer Success Copilot built into LightWork AI.
-
-Analyse this property management account and return ONLY valid JSON with no markdown fences, no explanation, just the raw JSON object.
-
-Required JSON structure:
-{
-  "status_line": "one sentence starting with the account name, their score, status, and what changed",
-  "why_score_changed": "2-3 sentences explaining specifically why the score is at this level compared to before",
-  "primary_drivers": ["specific driver 1","specific driver 2","specific driver 3"],
-  "business_impact": ["impact on customer 1","impact on customer 2","impact on renewals/expansion"],
-  "recommended_actions": ["specific action 1 with owner","specific action 2 with owner","specific action 3 with owner","specific action 4 with owner"],
-  "customer_email": "Full professional email. First line must be: Subject: [subject line]. Then blank line. Then email body. Sign off as the CSM. Use the account name and specific details.",
-  "internal_note": "3-4 sentences for the product/engineering team. Include specific metrics, workflow names, and what needs investigation."
-}
-
-ACCOUNT DATA:
-Name: ${c.name}
-Segment: ${c.segment} | Units: ${c.units.toLocaleString()} | ARR: £${c.arr.toLocaleString()} | Region: ${c.region}
-Health Score NOW: ${c.score}/100 | PREVIOUS: ${c.prevScore}/100 | CHANGE: ${scoreDrop>0?"-"+scoreDrop:"+"+Math.abs(scoreDrop)} points | Trend: ${c.trend}
-Status: ${h.label} | Days live: ${c.daysLive} | Renewal in: ${c.renewalDays} days | Login: ${c.loginFreq}
-
-CATEGORY SCORES (weighted):
-Onboarding 20%: ${c.onb}/100 | Training: ${c.trainingComplete}% | Integration: ${c.integrationComplete}%
-Adoption 30%: ${c.adp}/100 | Workflows active: ${wfAdopted}/5 | Login frequency: ${c.loginFreq}
-Support 20%: ${c.sup}/100 | Escalations: ${c.escalations} | Failed messages: ${c.failedMessages} | Open issues: ${c.openIssues}
-Sentiment 15%: ${c.sen}/100 | Tenant satisfaction: ${c.tenantSat}% | NPS: ${c.nps}
-Commercial 15%: ${c.com}/100 | Renewal: ${c.renewalDays} days
-
-WORKFLOW ADOPTION: ${WORKFLOWS.map(w=>w+": "+c.wfAdoption[w]+"%").join(" | ")}
-LOW ADOPTION (<30%): ${lowWf.length?lowWf.join(", "):"none"}
-
-Return ONLY the JSON. No other text.`;
-
-  const [result,setResult]=useState(null);
-  const [loading,setLoading]=useState(true);
-  const [errMsg,setErrMsg]=useState(null);
-  const fired=useRef(false);
-
-  useEffect(()=>{
-    if(fired.current)return;
-    fired.current=true;
-    callAI(prompt)
-      .then(raw=>{
-        const cleaned=raw.replace(/```json/g,"").replace(/```/g,"").trim();
-        const firstBrace=cleaned.indexOf("{");
-        const lastBrace=cleaned.lastIndexOf("}");
-        if(firstBrace===-1||lastBrace===-1)throw new Error("No JSON object found in response");
-        const jsonStr=cleaned.slice(firstBrace,lastBrace+1);
-        const parsed=JSON.parse(jsonStr);
-        setResult(parsed);setLoading(false);
-      })
-      .catch(e=>{
-        setErrMsg(e.message||"Unknown error");
-        setLoading(false);
-      });
-  },[]);
-
-  if(loading)return(
-    <div style={{background:"#fff",border:"0.5px solid #e5e7eb",borderRadius:14,padding:"24px"}}>
-      <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:20}}>
-        <div style={{width:32,height:32,borderRadius:8,background:"linear-gradient(135deg,#3b82f6,#8b5cf6)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:16}}>🤖</div>
-        <div>
-          <div style={{fontSize:13,fontWeight:600,color:"#0f1117"}}>Felicity CS Copilot</div>
-          <div style={{fontSize:11,color:"#9ca3af"}}>Analysing {c.name}…</div>
-        </div>
-        <div style={{marginLeft:"auto",display:"flex",gap:3}}>
-          {[0,1,2].map(i=><div key={i} style={{width:6,height:6,borderRadius:"50%",background:"#3b82f6",animation:`pulse 1.2s ${i*0.2}s infinite`}}/>)}
-        </div>
-      </div>
-      <div style={{display:"flex",flexDirection:"column",gap:10}}>
-        {[95,80,70,88,60,75,65].map((w,i)=>(
-          <div key={i} style={{height:13,borderRadius:6,background:"linear-gradient(90deg,#f0f2f5 25%,#e8eaed 50%,#f0f2f5 75%)",backgroundSize:"200% 100%",animation:"shimmer 1.4s infinite",width:w+"%"}}/>
-        ))}
-      </div>
-    </div>
-  );
-
-  if(errMsg)return(
-    <div style={{background:"#fef2f2",border:"0.5px solid #fca5a5",borderRadius:14,padding:"20px 24px"}}>
-      <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:8}}>
-        <div style={{width:32,height:32,borderRadius:8,background:"linear-gradient(135deg,#3b82f6,#8b5cf6)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:16}}>🤖</div>
-        <div style={{fontSize:13,fontWeight:600,color:"#0f1117"}}>Felicity CS Copilot</div>
-      </div>
-      <p style={{fontSize:13,color:"#dc2626",marginBottom:4}}>Felicity could not generate analysis.</p>
-      <p style={{fontSize:12,color:"#9ca3af",fontFamily:"monospace"}}>{errMsg}</p>
-      <p style={{fontSize:12,color:"#6b7280",marginTop:8}}>Check: 1) ANTHROPIC_API_KEY is set in Netlify environment variables. 2) You have triggered a redeploy after setting the key.</p>
-    </div>
-  );
+  const h = getHealthLabel(c.score);
+  const result = FELICITY.generate(c);
 
   return(
     <div style={{display:"flex",flexDirection:"column",gap:12}}>
-      {/* Felicity header + status */}
+      {/* Header */}
       <div style={{background:"#fff",border:`1.5px solid ${h.color}22`,borderLeft:`3px solid ${h.color}`,borderRadius:14,padding:"20px 22px"}}>
         <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:12}}>
           <div style={{width:36,height:36,borderRadius:10,background:"linear-gradient(135deg,#3b82f6,#8b5cf6)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,flexShrink:0}}>🤖</div>
@@ -581,35 +696,34 @@ Return ONLY the JSON. No other text.`;
             <div style={{fontSize:14,fontWeight:600,color:"#0f1117"}}>Felicity CS Copilot</div>
             <div style={{fontSize:11,color:"#9ca3af"}}>Account Status: <span style={{fontWeight:600,color:h.color}}>{h.label} ({c.score}/100)</span></div>
           </div>
-          <div style={{width:7,height:7,borderRadius:"50%",background:"#3b82f6",animation:"pulse 2s infinite",flexShrink:0}}/>
+          <div style={{display:"flex",alignItems:"center",gap:5}}>
+            <div style={{width:6,height:6,borderRadius:"50%",background:"#16a34a"}}/>
+            <span style={{fontSize:10,color:"#9ca3af",fontWeight:500}}>LIVE</span>
+          </div>
         </div>
-        <div style={{fontSize:14,color:"#0f1117",lineHeight:1.6,marginBottom:result.why_score_changed?10:0}}>{result.status_line}</div>
-        {result.why_score_changed&&<div style={{fontSize:13,color:"#6b7280",lineHeight:1.6,borderTop:"0.5px solid #f3f4f6",paddingTop:10,marginTop:4}}>{result.why_score_changed}</div>}
+        <div style={{fontSize:14,color:"#0f1117",lineHeight:1.65,fontWeight:500,marginBottom:10}}>{result.status_line}</div>
+        <div style={{fontSize:13,color:"#6b7280",lineHeight:1.65,borderTop:"0.5px solid #f3f4f6",paddingTop:10}}>{result.why_score_changed}</div>
       </div>
 
       {/* Drivers + Impact */}
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
         <div style={{background:"#fff",border:"0.5px solid #e5e7eb",borderRadius:12,padding:"16px 18px"}}>
-          <div style={{fontSize:12,fontWeight:600,color:"#dc2626",marginBottom:10,display:"flex",alignItems:"center",gap:6}}>
-            <span>⚠</span> Primary risk drivers
-          </div>
+          <div style={{fontSize:12,fontWeight:600,color:"#dc2626",marginBottom:10,display:"flex",alignItems:"center",gap:6}}>⚠ Primary risk drivers</div>
           <div style={{display:"flex",flexDirection:"column",gap:7}}>
-            {(result.primary_drivers||[]).map((d,i)=>(
-              <div key={i} style={{display:"flex",gap:8,alignItems:"flex-start",padding:"6px 8px",background:"#fef9f9",borderRadius:7}}>
-                <span style={{color:"#dc2626",fontWeight:700,flexShrink:0,fontSize:12}}>→</span>
+            {result.primary_drivers.map((d,i)=>(
+              <div key={i} style={{display:"flex",gap:8,alignItems:"flex-start",padding:"7px 9px",background:"#fef9f9",borderRadius:7,border:"0.5px solid #fee2e2"}}>
+                <span style={{color:"#dc2626",fontWeight:700,flexShrink:0,fontSize:11,marginTop:1}}>→</span>
                 <span style={{fontSize:12,color:"#374151",lineHeight:1.5}}>{d}</span>
               </div>
             ))}
           </div>
         </div>
         <div style={{background:"#fff",border:"0.5px solid #e5e7eb",borderRadius:12,padding:"16px 18px"}}>
-          <div style={{fontSize:12,fontWeight:600,color:"#d97706",marginBottom:10,display:"flex",alignItems:"center",gap:6}}>
-            <span>📊</span> Potential business impact
-          </div>
+          <div style={{fontSize:12,fontWeight:600,color:"#d97706",marginBottom:10,display:"flex",alignItems:"center",gap:6}}>📊 Potential business impact</div>
           <div style={{display:"flex",flexDirection:"column",gap:7}}>
-            {(result.business_impact||[]).map((d,i)=>(
-              <div key={i} style={{display:"flex",gap:8,alignItems:"flex-start",padding:"6px 8px",background:"#fffdf5",borderRadius:7}}>
-                <span style={{color:"#d97706",fontWeight:700,flexShrink:0,fontSize:12}}>→</span>
+            {result.business_impact.map((d,i)=>(
+              <div key={i} style={{display:"flex",gap:8,alignItems:"flex-start",padding:"7px 9px",background:"#fffdf5",borderRadius:7,border:"0.5px solid #fef3c7"}}>
+                <span style={{color:"#d97706",fontWeight:700,flexShrink:0,fontSize:11,marginTop:1}}>→</span>
                 <span style={{fontSize:12,color:"#374151",lineHeight:1.5}}>{d}</span>
               </div>
             ))}
@@ -619,12 +733,10 @@ Return ONLY the JSON. No other text.`;
 
       {/* Actions */}
       <div style={{background:"#fff",border:"0.5px solid #e5e7eb",borderRadius:12,padding:"16px 18px"}}>
-        <div style={{fontSize:12,fontWeight:600,color:"#16a34a",marginBottom:12,display:"flex",alignItems:"center",gap:6}}>
-          <span>✓</span> Recommended actions
-        </div>
+        <div style={{fontSize:12,fontWeight:600,color:"#16a34a",marginBottom:12}}>✓ Recommended actions</div>
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
-          {(result.recommended_actions||[]).map((a,i)=>(
-            <div key={i} style={{display:"flex",gap:10,alignItems:"flex-start",padding:"8px 10px",background:"#f0fdf4",borderRadius:8,border:"0.5px solid #86efac"}}>
+          {result.recommended_actions.map((a,i)=>(
+            <div key={i} style={{display:"flex",gap:10,alignItems:"flex-start",padding:"9px 11px",background:"#f0fdf4",borderRadius:8,border:"0.5px solid #86efac"}}>
               <div style={{width:20,height:20,borderRadius:"50%",background:"#16a34a",display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,fontWeight:700,color:"#fff",flexShrink:0}}>{i+1}</div>
               <span style={{fontSize:12,color:"#374151",lineHeight:1.5,paddingTop:1}}>{a}</span>
             </div>
@@ -635,21 +747,17 @@ Return ONLY the JSON. No other text.`;
       {/* Email */}
       <div style={{background:"#fff",border:"0.5px solid #e5e7eb",borderRadius:12,padding:"16px 18px"}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
-          <div style={{fontSize:12,fontWeight:600,color:"#374151",display:"flex",alignItems:"center",gap:6}}>
-            <span>✉</span> Draft customer communication
-          </div>
-          <CopyButton text={result.customer_email||""}/>
+          <div style={{fontSize:12,fontWeight:600,color:"#374151"}}>✉ Draft customer communication</div>
+          <CopyButton text={result.customer_email}/>
         </div>
-        <div style={{background:"#f9fafb",borderRadius:8,padding:"14px 16px",fontSize:13,color:"#374151",lineHeight:1.8,whiteSpace:"pre-wrap",border:"0.5px solid #e5e7eb",fontFamily:"Georgia,serif"}}>{result.customer_email}</div>
+        <div style={{background:"#f9fafb",borderRadius:8,padding:"14px 16px",fontSize:13,color:"#374151",lineHeight:1.8,whiteSpace:"pre-wrap",border:"0.5px solid #e5e7eb"}}>{result.customer_email}</div>
       </div>
 
       {/* Internal note */}
       <div style={{background:"#fff",border:"0.5px solid #e5e7eb",borderRadius:12,padding:"16px 18px"}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
-          <div style={{fontSize:12,fontWeight:600,color:"#374151",display:"flex",alignItems:"center",gap:6}}>
-            <span>🔧</span> Internal product / engineering note
-          </div>
-          <CopyButton text={result.internal_note||""}/>
+          <div style={{fontSize:12,fontWeight:600,color:"#374151"}}>🔧 Internal product / engineering note</div>
+          <CopyButton text={result.internal_note}/>
         </div>
         <div style={{background:"#f9fafb",borderRadius:8,padding:"14px 16px",fontSize:13,color:"#374151",lineHeight:1.7,whiteSpace:"pre-wrap",border:"0.5px solid #e5e7eb"}}>{result.internal_note}</div>
       </div>
