@@ -800,8 +800,7 @@ KEY METRICS:
 • NPS: ${c.nps}
 
 IMMEDIATE ACTION REQUIRED:
-${(result?.recommended_actions||[]).map((a,i)=>`${i+1}. ${a}`).join("
-")}
+${(result?.recommended_actions||[]).map((a,i)=>`${i+1}. ${a}`).join("\n")}
 
 Internal note: ${result?.internal_note||"Engineering review required."}`,
     },
@@ -824,8 +823,7 @@ ${c.failedMessages>0?`• ${c.failedMessages} failed message deliveries — inve
 `:""}${c.openIssues>0?`• ${c.openIssues} unresolved support tickets
 `:""}
 WORKFLOW ADOPTION (low adoption may indicate UX or config issues):
-${WORKFLOWS.filter(w=>c.wfAdoption[w]<50).map(w=>`• ${w}: ${c.wfAdoption[w]}% — below 50% threshold`).join("
-")}
+${WORKFLOWS.filter(w=>c.wfAdoption[w]<50).map(w=>`• ${w}: ${c.wfAdoption[w]}% — below 50% threshold`).join("\n")}
 
 FULL CONTEXT:
 ${result?.internal_note||"See Felicity CS Copilot analysis for full account context."}
@@ -855,8 +853,7 @@ AGENDA:
    • Key metrics: Tenant satisfaction ${c.tenantSat}% | NPS ${c.nps}
 
 2. Workflow adoption deep-dive (10 min)
-${WORKFLOWS.map(w=>`   • ${w}: ${c.wfAdoption[w]}%`).join("
-")}
+${WORKFLOWS.map(w=>`   • ${w}: ${c.wfAdoption[w]}%`).join("\n")}
 
 3. Issue resolution update (10 min)
    • Open escalations: ${c.escalations}
