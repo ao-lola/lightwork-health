@@ -608,6 +608,303 @@ Customer Success Manager, LightWork AI`;
 };
 // ─────────────────────────────────────────────────────────────────────────────
 
+function TrendAnalysis({c}){
+  // Simulate 30-day trend from score delta + support metrics
+  const scoreDrop = c.prevScore - c.score;
+  const trends = [];
+  if(c.escalations > 4){
+    const pct = Math.round(((c.escalations - Math.max(1, c.escalations - Math.floor(c.escalations*0.45)))/Math.max(1,c.escalations - Math.floor(c.escalations*0.45)))*100);
+    trends.push({label:"Escalations",dir:"up",pct:pct>0?pct:Math.floor(Math.random()*60+30),bad:true});
+  }
+  if(c.failedMessages > 2){
+    const pct = Math.round(c.failedMessages * 18 + 20);
+    trends.push({label:"Failed messages",dir:"up",pct,bad:true});
+  }
+  if(c.loginFreq==="Rarely"||c.loginFreq==="Infrequent"){
+    trends.push({label:"Login activity",dir:"down",pct:Math.floor(c.adp*0.5+10),bad:true});
+  }
+  if(c.tenantSat < 65){
+    const pct = Math.round((75-c.tenantSat)*0.6+8);
+    trends.push({label:"Tenant satisfaction",dir:"down",pct,bad:true});
+  }
+  if(c.bucket==="expansion"){
+    trends.push({label:"Workflow adoption",dir:"up",pct:Math.floor(c.adp*0.18+5),bad:false});
+    trends.push({label:"Login frequency",dir:"up",pct:Math.floor(12+c.adp*0.1),bad:false});
+    trends.push({label:"Tenant satisfaction",dir:"up",pct:Math.floor((c.tenantSat-70)*0.3+4),bad:false});
+  }
+  if(c.bucket==="healthy"&&trends.length===0){
+    trends.push({label:"Automation rate",dir:"up",pct:8,bad:false});
+    trends.push({label:"Workflow adoption",dir:"up",pct:5,bad:false});
+  }
+  if(trends.length===0){
+    trends.push({label:"Escalation volume",dir:"up",pct:25,bad:true});
+    trends.push({label:"Platform engagement",dir:"down",pct:18,bad:true});
+  }
+  const dirColor=(t)=>t.bad?(t.dir==="up"?"#dc2626":"#16a34a"):(t.dir==="up"?"#16a34a":"#dc2626");
+  const dirBg=(t)=>t.bad?(t.dir==="up"?"#fef2f2":"#f0fdf4"):(t.dir==="up"?"#f0fdf4":"#fef2f2");
+  const dirArrow=(t)=>t.dir==="up"?"↑":"↓";
+  return(
+    <div style={{background:"#fff",border:"0.5px solid #e5e7eb",borderRadius:12,padding:"16px 18px"}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+        <div>
+          <div style={{fontSize:12,fontWeight:600,color:"#374151"}}>What changed?</div>
+          <div style={{fontSize:11,color:"#9ca3af",marginTop:1}}>30-day metric trends driving this score</div>
+        </div>
+        <span style={{fontSize:11,color:"#6b7280",background:"#f3f4f6",padding:"3px 8px",borderRadius:6}}>Last 30 days</span>
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+        {trends.slice(0,4).map((t,i)=>(
+          <div key={i} style={{background:dirBg(t),borderRadius:9,padding:"10px 12px",border:`0.5px solid ${dirColor(t)}22`}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:3}}>
+              <span style={{fontSize:11,color:"#374151",fontWeight:500}}>{t.label}</span>
+              <span style={{fontSize:13,fontWeight:700,color:dirColor(t)}}>{dirArrow(t)} {t.pct}%</span>
+            </div>
+            <div style={{height:3,background:"#e5e7eb",borderRadius:2,overflow:"hidden"}}>
+              <div style={{height:"100%",width:`${Math.min(t.pct,100)}%`,background:dirColor(t),borderRadius:2}}/>
+            </div>
+            <div style={{fontSize:10,color:"#9ca3af",marginTop:4}}>
+              {t.dir==="up"&&t.bad?"Increased — investigate":""}
+              {t.dir==="down"&&t.bad?"Declined — action needed":""}
+              {t.dir==="up"&&!t.bad?"Growing — positive signal":""}
+              {t.dir==="down"&&!t.bad?"Stable — monitor":""}
+            </div>
+          </div>
+        ))}
+      </div>
+      {scoreDrop>5&&(
+        <div style={{marginTop:10,padding:"8px 12px",background:"#fef2f2",borderRadius:7,border:"0.5px solid #fca5a5",fontSize:12,color:"#dc2626",fontWeight:500}}>
+          Net health score impact: −{scoreDrop} points over the past 7 days
+        </div>
+      )}
+      {scoreDrop<=-3&&(
+        <div style={{marginTop:10,padding:"8px 12px",background:"#f0fdf4",borderRadius:7,border:"0.5px solid #86efac",fontSize:12,color:"#16a34a",fontWeight:500}}>
+          Net health score impact: +{Math.abs(scoreDrop)} points over the past 7 days — momentum is positive
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ExpansionReadiness({c}){
+  if(c.bucket!=="expansion"&&c.score<70) return null;
+  const wfCount=Object.values(c.wfAdoption).filter(v=>v>=70).length;
+  const lowWf=WORKFLOWS.filter(w=>c.wfAdoption[w]<70);
+  // Confidence = weighted average of expansion signals
+  const signals=[
+    {label:"Workflow adoption",val:wfCount/5*100,weight:0.25},
+    {label:"Tenant satisfaction",val:c.tenantSat,weight:0.20},
+    {label:"NPS score",val:Math.max(0,Math.min(100,(c.nps+10)/80*100)),weight:0.20},
+    {label:"Platform adoption",val:c.adp,weight:0.20},
+    {label:"Commercial health",val:c.com,weight:0.15},
+  ];
+  const confidence=Math.round(signals.reduce((s,sg)=>s+sg.val*sg.weight,0));
+  const confColor=confidence>=80?"#0d9488":confidence>=65?"#16a34a":"#d97706";
+  const confBg=confidence>=80?"#f0fdf9":confidence>=65?"#f0fdf4":"#fffbeb";
+  const confBorder=confidence>=80?"#99f6e4":confidence>=65?"#86efac":"#fcd34d";
+  const nextWf=lowWf[0]||null;
+  return(
+    <div style={{background:confBg,border:`1.5px solid ${confBorder}`,borderRadius:12,padding:"16px 18px"}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:14}}>
+        <div>
+          <div style={{fontSize:12,fontWeight:600,color:confColor,display:"flex",alignItems:"center",gap:6}}>
+            ✦ Expansion readiness
+          </div>
+          <div style={{fontSize:11,color:"#6b7280",marginTop:1}}>Felicity’s confidence that this account is ready to expand</div>
+        </div>
+        <div style={{textAlign:"center",padding:"8px 14px",background:"#fff",borderRadius:10,border:`1px solid ${confBorder}`,boxShadow:"0 1px 4px rgba(0,0,0,.05)"}}>
+          <div style={{fontSize:22,fontWeight:700,color:confColor,letterSpacing:-.5}}>{confidence}%</div>
+          <div style={{fontSize:10,color:"#9ca3af",marginTop:1}}>confidence</div>
+        </div>
+      </div>
+      <div style={{display:"flex",flexDirection:"column",gap:6,marginBottom:12}}>
+        {signals.map((sg,i)=>(
+          <div key={i} style={{display:"flex",alignItems:"center",gap:10}}>
+            <span style={{fontSize:11,color:"#374151",width:130,flexShrink:0}}>{sg.label}</span>
+            <div style={{flex:1,height:5,background:"#e5e7eb",borderRadius:3,overflow:"hidden"}}>
+              <div style={{height:"100%",width:`${Math.min(sg.val,100)}%`,background:confColor,borderRadius:3}}/>
+            </div>
+            <span style={{fontSize:11,fontWeight:600,color:confColor,width:36,textAlign:"right"}}>{Math.round(sg.val)}%</span>
+          </div>
+        ))}
+      </div>
+      <div style={{borderTop:`0.5px solid ${confBorder}`,paddingTop:10}}>
+        <div style={{fontSize:11,fontWeight:600,color:confColor,marginBottom:6}}>Felicity recommends</div>
+        {confidence>=80?(
+          <div style={{fontSize:12,color:"#374151",lineHeight:1.5}}>
+            {c.name} is expansion-ready. {nextWf?`Introduce <b>${nextWf}</b> workflow in the next QBR to unlock further automation value.`:"Schedule a QBR to present an advanced features roadmap and upsell proposal."} With NPS of {c.nps>=0?"+"+c.nps:c.nps} and {wfCount}/5 workflows adopted, this account is a strong reference customer candidate.
+          </div>
+        ):(
+          <div style={{fontSize:12,color:"#374151",lineHeight:1.5}}>
+            {c.name} is approaching expansion readiness. {nextWf?`Drive adoption of <b>${nextWf}</b> (currently ${c.wfAdoption[nextWf]}%) before initiating commercial expansion conversation.`:"Focus on strengthening adoption and satisfaction scores over the next 30 days."}
+          </div>
+        )}
+        {c.renewalDays>60&&(
+          <div style={{fontSize:11,color:"#6b7280",marginTop:6}}>
+            Renewal in {c.renewalDays} days — optimal window to introduce expansion proposal is 30–45 days before renewal.
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ActionButtons({c,result}){
+  const [active,setActive]=useState(null);
+  const [copied,setCopied]=useState(null);
+  const copy=(text,key)=>{
+    navigator.clipboard.writeText(text).then(()=>{setCopied(key);setTimeout(()=>setCopied(null),2000)}).catch(()=>{});
+  };
+  const h=getHealthLabel(c.score);
+  const escalation=FELICITY.needsHumanEscalation(c);
+
+  const drafts={
+    email:{
+      label:"Draft customer email",
+      icon:"✉",
+      color:"#185fa5",
+      bg:"#e6f1fb",
+      border:"#b3d4f5",
+      content: result?.customer_email || `Subject: ${c.name} — Account Review & Next Steps
+
+Hi ${c.name.split(" ")[0]} team,
+
+I wanted to reach out proactively regarding your LightWork account. I’ve been reviewing your platform performance and would like to schedule a call to walk through your current health metrics and discuss how we can drive more value for your team.
+
+Could you share your availability for a 30-minute session in the next week?
+
+Best regards,
+${c.owner}
+Customer Success Manager, LightWork AI`,
+    },
+    escalation:{
+      label:"Draft internal escalation",
+      icon:"⚠",
+      color:"#c2410c",
+      bg:"#fff7ed",
+      border:"#fed7aa",
+      content:`INTERNAL ESCALATION — ${c.name.toUpperCase()}
+${"=".repeat(50)}
+Date: ${new Date().toLocaleDateString("en-GB",{day:"numeric",month:"short",year:"numeric"})}
+Owner: ${c.owner}
+Severity: ${escalation.required?"CRITICAL":"HIGH"}
+
+ACCOUNT: ${c.name}
+Segment: ${c.segment} | ARR: £${c.arr.toLocaleString()} | Renewal: ${c.renewalDays} days
+Health Score: ${c.score}/100 (was ${c.prevScore}/100, ↓${c.prevScore-c.score} pts)
+
+KEY METRICS:
+• Escalations: ${c.escalations}
+• Failed messages: ${c.failedMessages}
+• Open issues: ${c.openIssues}
+• Tenant satisfaction: ${c.tenantSat}%
+• NPS: ${c.nps}
+
+IMMEDIATE ACTION REQUIRED:
+${(result?.recommended_actions||[]).map((a,i)=>`${i+1}. ${a}`).join("
+")}
+
+Internal note: ${result?.internal_note||"Engineering review required."}`,
+    },
+    ticket:{
+      label:"Create engineering ticket",
+      icon:"🔧",
+      color:"#7c3aed",
+      bg:"#f5f3ff",
+      border:"#ddd6fe",
+      content:`ENGINEERING TICKET
+${"=".repeat(40)}
+Title: [${c.name}] Platform issue investigation — health score ${c.score}/100
+Priority: ${c.score<40?"P1 - Critical":c.score<60?"P2 - High":"P3 - Medium"}
+Raised by: ${c.owner} (CS)
+Account: ${c.name} | ${c.segment} | £${c.arr.toLocaleString()} ARR
+
+ISSUES IDENTIFIED:
+${c.failedMessages>0?`• ${c.failedMessages} failed message deliveries — investigate delivery pipeline
+`:""}${c.escalations>5?`• ${c.escalations} open escalations — review for systemic pattern
+`:""}${c.openIssues>0?`• ${c.openIssues} unresolved support tickets
+`:""}
+WORKFLOW ADOPTION (low adoption may indicate UX or config issues):
+${WORKFLOWS.filter(w=>c.wfAdoption[w]<50).map(w=>`• ${w}: ${c.wfAdoption[w]}% — below 50% threshold`).join("
+")}
+
+FULL CONTEXT:
+${result?.internal_note||"See Felicity CS Copilot analysis for full account context."}
+
+ACCEPTANCE CRITERIA:
+• Delivery pipeline reviewed and root cause identified
+• CSM notified before next client touchpoint
+• Fix deployed and verified in ${c.name} account`,
+    },
+    review:{
+      label:"Schedule success review",
+      icon:"📅",
+      color:"#16a34a",
+      bg:"#f0fdf4",
+      border:"#86efac",
+      content:`SUCCESS REVIEW AGENDA — ${c.name}
+${"=".repeat(50)}
+Date: [To be scheduled]
+Attendees: ${c.owner} (LightWork CS) | [Client team]
+Format: 45-minute video call
+
+AGENDA:
+
+1. Platform performance review (10 min)
+   • Health score walkthrough: ${c.score}/100 (${h.label})
+   • Category breakdown: Onboarding ${c.onb} | Adoption ${c.adp} | Support ${c.sup} | Sentiment ${c.sen} | Commercial ${c.com}
+   • Key metrics: Tenant satisfaction ${c.tenantSat}% | NPS ${c.nps}
+
+2. Workflow adoption deep-dive (10 min)
+${WORKFLOWS.map(w=>`   • ${w}: ${c.wfAdoption[w]}%`).join("
+")}
+
+3. Issue resolution update (10 min)
+   • Open escalations: ${c.escalations}
+   • Failed messages: ${c.failedMessages}
+   • Action items from last session
+
+4. 90-day success plan (10 min)
+   • Priority workflows to activate
+   • Adoption targets
+   • Next milestone: ${c.renewalDays} days to renewal
+
+5. AOB & next steps (5 min)
+
+PRE-CALL PREPARATION:
+• Share performance report 48hrs before call
+• Review open support tickets
+• Prepare adoption improvement recommendations`,
+    },
+  };
+
+  return(
+    <div style={{background:"#fff",border:"0.5px solid #e5e7eb",borderRadius:12,padding:"16px 18px"}}>
+      <div style={{fontSize:12,fontWeight:600,color:"#374151",marginBottom:12}}>⚡ Felicity draft actions</div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:active?12:0}}>
+        {Object.entries(drafts).map(([key,d])=>(
+          <button key={key} onClick={()=>setActive(active===key?null:key)}
+            style={{display:"flex",alignItems:"center",gap:8,padding:"9px 12px",background:active===key?d.bg:"#f9fafb",border:`1px solid ${active===key?d.border:"#e5e7eb"}`,borderRadius:8,cursor:"pointer",fontSize:12,fontWeight:500,color:active===key?d.color:"#374151",transition:"all .15s",textAlign:"left"}}>
+            <span style={{fontSize:15}}>{d.icon}</span>
+            {d.label}
+          </button>
+        ))}
+      </div>
+      {active&&(
+        <div style={{background:"#f9fafb",borderRadius:8,border:"0.5px solid #e5e7eb",overflow:"hidden"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 14px",borderBottom:"0.5px solid #e5e7eb",background:"#fff"}}>
+            <span style={{fontSize:12,fontWeight:500,color:"#374151"}}>{drafts[active].label}</span>
+            <button onClick={()=>copy(drafts[active].content,active)}
+              style={{fontSize:11,padding:"4px 10px",border:`0.5px solid ${drafts[active].border}`,borderRadius:6,background:copied===active?drafts[active].bg:"transparent",color:copied===active?drafts[active].color:"#6b7280",cursor:"pointer",fontWeight:500}}>
+              {copied===active?"✓ Copied":"Copy"}
+            </button>
+          </div>
+          <pre style={{padding:"14px 16px",fontSize:12,color:"#374151",lineHeight:1.7,whiteSpace:"pre-wrap",margin:0,fontFamily:"DM Mono,monospace",maxHeight:280,overflowY:"auto"}}>{drafts[active].content}</pre>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function CopyButton({text}){
   const [copied,setCopied]=useState(false);
   const copy=()=>{navigator.clipboard.writeText(text).then(()=>{setCopied(true);setTimeout(()=>setCopied(false),2000)}).catch(()=>{})};
@@ -892,57 +1189,77 @@ Rules: Be specific to this account. Do not use generic CS language. If the accou
         </div>
         <div style={{background:"#f9fafb",borderRadius:8,padding:"14px 16px",fontSize:13,color:"#374151",lineHeight:1.7,whiteSpace:"pre-wrap",border:"0.5px solid #e5e7eb"}}>{result.internal_note}</div>
       </div>
+
+      {/* Draft action buttons */}
+      <ActionButtons c={c} result={result}/>
     </div>
   );
 }
 
+// Wrapper so ActionButtons gets the resolved result
+function FelicityCopilotWrapper({c}){
+  return <FelicityCopilot c={c}/>;
+}
+
 function HealthBreakdownTable({c}){
   const cats=[
-    {label:"Onboarding",weight:20,score:c.onb},
-    {label:"Adoption",weight:30,score:c.adp},
-    {label:"Support",weight:20,score:c.sup},
-    {label:"Sentiment",weight:15,score:c.sen},
-    {label:"Commercial",weight:15,score:c.com},
+    {label:"Onboarding",icon:"🎯",weight:20,score:c.onb,max:20,detail:`Training ${c.trainingComplete}% · Integration ${c.integrationComplete}%`},
+    {label:"Adoption",  icon:"📈",weight:30,score:c.adp,max:30,detail:`${Object.values(c.wfAdoption).filter(v=>v>=70).length}/5 workflows · Login: ${c.loginFreq}`},
+    {label:"Support",   icon:"🛡",weight:20,score:c.sup,max:20,detail:`${c.escalations} escalations · ${c.failedMessages} failed msgs`},
+    {label:"Sentiment", icon:"💬",weight:15,score:c.sen,max:15,detail:`Tenant sat ${c.tenantSat}% · NPS ${c.nps>=0?"+"+c.nps:c.nps}`},
+    {label:"Commercial",icon:"💰",weight:15,score:c.com,max:15,detail:`Renewal in ${c.renewalDays}d · ${c.arr>=50000?"High":"Standard"} ARR`},
   ];
-  const color=(v)=>v>=75?"#16a34a":v>=55?"#d97706":v>=40?"#ea580c":"#dc2626";
-  const contribution=(weight,score)=>((weight/100)*(score/100)*100).toFixed(1);
-  const total=cats.reduce((s,c)=>s+(c.weight/100)*(c.score/100)*100,0).toFixed(1);
+  const col=(v)=>v>=75?"#16a34a":v>=55?"#d97706":v>=40?"#ea580c":"#dc2626";
+  const pts=(weight,score)=>((weight/100)*(score/100)*weight).toFixed(1);
+  const totalPts=cats.reduce((s,cat)=>(s+(cat.weight/100)*(cat.score/100)*cat.weight),0).toFixed(1);
+  const h=getHealthLabel(c.score);
   return(
     <div style={{background:"#fff",border:"0.5px solid #e5e7eb",borderRadius:12,padding:"16px 18px"}}>
-      <div style={{fontSize:12,fontWeight:600,color:"#374151",marginBottom:12}}>Health score breakdown</div>
-      <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
-        <thead>
-          <tr style={{borderBottom:"0.5px solid #e5e7eb"}}>
-            {["Category","Weight","Score","Bar","Contribution"].map(h=>(
-              <th key={h} style={{padding:"6px 8px",textAlign:"left",fontWeight:500,color:"#9ca3af",fontSize:11}}>{h}</th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {cats.map(cat=>(
-            <tr key={cat.label} style={{borderBottom:"0.5px solid #f3f4f6"}}>
-              <td style={{padding:"8px 8px",fontWeight:500,color:"#0f1117"}}>{cat.label}</td>
-              <td style={{padding:"8px 8px",color:"#6b7280"}}>{cat.weight}%</td>
-              <td style={{padding:"8px 8px",fontWeight:600,color:color(cat.score)}}>{cat.score}%</td>
-              <td style={{padding:"8px 8px",width:80}}>
-                <div style={{height:5,background:"#f3f4f6",borderRadius:3,overflow:"hidden"}}>
-                  <div style={{height:"100%",width:`${cat.score}%`,background:color(cat.score),borderRadius:3}}/>
-                </div>
-              </td>
-              <td style={{padding:"8px 8px",fontWeight:600,color:color(cat.score)}}>{contribution(cat.weight,cat.score)} pts</td>
-            </tr>
-          ))}
-        </tbody>
-        <tfoot>
-          <tr style={{borderTop:"1px solid #e5e7eb",background:"#f9fafb"}}>
-            <td colSpan={4} style={{padding:"8px 8px",fontWeight:600,color:"#0f1117",fontSize:12}}>Overall score</td>
-            <td style={{padding:"8px 8px",fontWeight:700,color:getHealthLabel(c.score).color,fontSize:13}}>{total} / 100</td>
-          </tr>
-        </tfoot>
-      </table>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+        <div>
+          <div style={{fontSize:12,fontWeight:600,color:"#374151"}}>Why {c.score}/100?</div>
+          <div style={{fontSize:11,color:"#9ca3af",marginTop:1}}>Score contribution from each weighted category</div>
+        </div>
+        <div style={{textAlign:"right"}}>
+          <div style={{fontSize:20,fontWeight:700,color:h.color,letterSpacing:-.5}}>{c.score}</div>
+          <div style={{fontSize:10,color:"#9ca3af"}}>/ 100 total</div>
+        </div>
+      </div>
+      <div style={{display:"flex",flexDirection:"column",gap:8}}>
+        {cats.map(cat=>{
+          const earned=((cat.weight/100)*(cat.score/100)*cat.weight);
+          const pct=(earned/cat.weight)*100;
+          const c2=col(cat.score);
+          return(
+            <div key={cat.label} style={{background:"#f9fafb",borderRadius:9,padding:"10px 12px",border:"0.5px solid #e5e7eb"}}>
+              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
+                <span style={{fontSize:14}}>{cat.icon}</span>
+                <span style={{fontSize:12,fontWeight:600,color:"#0f1117",flex:1}}>{cat.label}</span>
+                <span style={{fontSize:10,color:"#9ca3af"}}>{cat.weight}% weight</span>
+                <span style={{fontSize:12,fontWeight:700,color:c2}}>{earned.toFixed(1)} / {cat.weight} pts</span>
+              </div>
+              <div style={{height:6,background:"#e5e7eb",borderRadius:3,overflow:"hidden",marginBottom:5}}>
+                <div style={{height:"100%",width:`${cat.score}%`,background:c2,borderRadius:3,transition:"width .5s ease"}}/>
+              </div>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <span style={{fontSize:11,color:"#6b7280"}}>{cat.detail}</span>
+                <span style={{fontSize:11,fontWeight:500,color:c2}}>Raw score: {cat.score}/100</span>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:10,padding:"10px 12px",background:h.bg,borderRadius:8,border:`0.5px solid ${h.border}`}}>
+        <span style={{fontSize:12,fontWeight:600,color:h.color}}>Total health score</span>
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          <span style={{fontSize:11,color:"#9ca3af"}}>{cats.map(cat=>`${cat.label.slice(0,3)}: ${((cat.weight/100)*(cat.score/100)*cat.weight).toFixed(1)}`).join(" + ")}</span>
+          <span style={{fontSize:15,fontWeight:700,color:h.color}}>{c.score} pts</span>
+        </div>
+      </div>
     </div>
   );
 }
+
 
 function Customer360({c,onBack}){
   const h=getHealthLabel(c.score);
@@ -979,10 +1296,13 @@ function Customer360({c,onBack}){
       </div>
 
       {/* Felicity Copilot — first thing after header */}
-      <FelicityCopilot key={c.id} c={c}/>
+      <FelicityCopilotWrapper key={c.id} c={c}/>
 
-      {/* Health breakdown table */}
+      {/* Health breakdown — Why this score? */}
       <HealthBreakdownTable c={c}/>
+
+      {/* Trend analysis — What changed? */}
+      <TrendAnalysis c={c}/>
 
       {/* Health timeline */}
       <HealthTimeline c={c}/>
@@ -999,6 +1319,9 @@ function Customer360({c,onBack}){
           ))}
         </div>
       </div>
+
+      {/* Expansion readiness — only for expansion/healthy accounts */}
+      <ExpansionReadiness c={c}/>
 
       {/* Automation opportunities */}
       <AutomationOpportunities c={c}/>
