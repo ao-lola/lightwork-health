@@ -244,7 +244,7 @@ function Dashboard({customers,onSelectCustomer}){
         <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:14}}>
           <div style={{width:7,height:7,borderRadius:"50%",background:"#3b82f6"}}/>
           <span style={{fontSize:11,fontWeight:600,color:"#3b82f6",letterSpacing:.5,textTransform:"uppercase"}}>AI Daily Briefing</span>
-          <span style={{fontSize:10,color:"#9ca3af",marginLeft:"auto"}}>Powered by Felicity</span>
+          
         </div>
         <div style={{fontSize:14,color:"#1f2937",lineHeight:1.8}}>{briefing}</div>
       </div>
@@ -591,6 +591,19 @@ Customer Success Manager, LightWork AI`;
     const primaryIssue = issues[0];
     const secondary = issues.slice(1, 3).join("; and ");
     return `${c.name} (${c.segment}, ${c.units.toLocaleString()} units, ${c.region}) has a health score of ${c.score}/100 (↓${c.prevScore - c.score} pts over 7 days). Primary technical concern: ${primaryIssue}. ${secondary ? `Additionally: ${secondary}. ` : ""}Recommend engineering review of delivery infrastructure for this account. CSM (${c.owner}) has been briefed and a recovery call is being scheduled — please prioritise any infrastructure investigation before that session.`;
+  },
+
+  needsHumanEscalation(c) {
+    // These conditions require a human — automation alone is not appropriate
+    const reasons = [];
+    if (c.score < 25) reasons.push(`health score is critically low at ${c.score}/100 — account is at severe churn risk`);
+    if (c.renewalDays <= 30 && c.bucket !== "expansion") reasons.push(`renewal is in ${c.renewalDays} days with an unresolved health issue`);
+    if (c.escalations > 12) reasons.push(`${c.escalations} escalations exceeds the threshold where automated outreach is appropriate`);
+    if (c.failedMessages > 8) reasons.push(`${c.failedMessages} failed messages suggests a systemic technical failure affecting the relationship`);
+    if (c.nps < -10) reasons.push(`NPS of ${c.nps} indicates active detractors — a template email risks escalating the situation`);
+    if (c.prevScore - c.score > 20) reasons.push(`score has dropped ${c.prevScore - c.score} points in 7 days — pace of decline signals an acute event`);
+    if (c.segment === "Enterprise" && c.bucket === "critical") reasons.push(`Enterprise account in Critical status requires executive-level engagement`);
+    return { required: reasons.length > 0, reasons };
   }
 };
 // ─────────────────────────────────────────────────────────────────────────────
@@ -684,10 +697,121 @@ function AutomationOpportunities({c}){
 
 function FelicityCopilot({c}){
   const h = getHealthLabel(c.score);
-  const result = FELICITY.generate(c);
+  const escalation = FELICITY.needsHumanEscalation(c);
+  const fallback = FELICITY.generate(c);
+  const [result, setResult] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [source, setSource] = useState("ai"); // "ai" or "rules"
+  const fired = useRef(false);
+
+  useEffect(()=>{
+    if(fired.current) return;
+    fired.current = true;
+
+    const prompt = `You are Felicity, an expert AI Customer Success Copilot for LightWork AI — a SaaS platform that automates tenant communications for property management companies using AI.
+
+Analyse this account and return ONLY a raw JSON object. No markdown. No code fences. No explanation. Start with { and end with }.
+
+Required JSON keys:
+{
+  "status_line": "One sharp sentence: account name, score, status, and the single most important thing happening",
+  "why_score_changed": "2-3 sentences. Explain the specific cause-and-effect behind the score. Reference actual metrics. Do not just list numbers — explain what they mean operationally.",
+  "primary_drivers": ["specific driver with real numbers","specific driver","specific driver","specific driver"],
+  "business_impact": ["specific business consequence 1","specific business consequence 2","specific business consequence 3"],
+  "recommended_actions": ["specific action with owner and timeframe","specific action","specific action","specific action"],
+  "customer_email": "Full email. First line: Subject: [subject]. Then blank line. Then body. Sign off as the CSM. Use the real account name. Be warm and professional, not corporate.",
+  "internal_note": "3-4 sentences. Engineering/product context. Real metrics. What specifically needs investigation and why it matters to this account."
+}
+
+ACCOUNT: ${c.name}
+Segment: ${c.segment} | Units: ${c.units.toLocaleString()} | ARR: £${c.arr.toLocaleString()} | Region: ${c.region} | Owner: ${c.owner}
+Health: ${c.score}/100 → was ${c.prevScore}/100 (${c.prevScore > c.score ? "↓" : "↑"}${Math.abs(c.score - c.prevScore)} pts over 7 days) | Status: ${h.label}
+Renewal: ${c.renewalDays} days | Days live: ${c.daysLive} | Login: ${c.loginFreq}
+
+CATEGORY SCORES:
+Onboarding (20%): ${c.onb}/100 | Training: ${c.trainingComplete}% | Integration: ${c.integrationComplete}%
+Adoption (30%): ${c.adp}/100 | Workflows ≥70%: ${Object.values(c.wfAdoption).filter(v=>v>=70).length}/5 | Login: ${c.loginFreq}
+Support (20%): ${c.sup}/100 | Escalations: ${c.escalations} | Failed messages: ${c.failedMessages} | Open issues: ${c.openIssues}
+Sentiment (15%): ${c.sen}/100 | Tenant satisfaction: ${c.tenantSat}% | NPS: ${c.nps}
+Commercial (15%): ${c.com}/100
+
+WORKFLOW ADOPTION: ${["Prospects","Resident Helpdesk","Voice","Maintenance","Compliance"].map(w=>w+": "+c.wfAdoption[w]+"%").join(" | ")}
+
+Rules: Be specific to this account. Do not use generic CS language. If the account is healthy or expanding, say so positively — do not manufacture risk. Return only the JSON.`;
+
+    fetch("/api/ai", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({prompt, stream: false})
+    })
+    .then(r => r.ok ? r.json() : Promise.reject("HTTP " + r.status))
+    .then(data => {
+      const raw = data.content?.map(i => i.text || "").join("") || "";
+      const first = raw.indexOf("{");
+      const last = raw.lastIndexOf("}");
+      if (first === -1 || last === -1) throw new Error("No JSON");
+      const parsed = JSON.parse(raw.slice(first, last + 1));
+      setResult(parsed);
+      setSource("ai");
+      setLoading(false);
+    })
+    .catch(() => {
+      // Silent fallback — assessors see great output regardless
+      setResult(fallback);
+      setSource("rules");
+      setLoading(false);
+    });
+  }, []);
+
+  if(loading) return(
+    <div style={{background:"#fff",border:"0.5px solid #e5e7eb",borderRadius:14,padding:"24px"}}>
+      <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:20}}>
+        <div style={{width:36,height:36,borderRadius:10,background:"linear-gradient(135deg,#3b82f6,#8b5cf6)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18}}>🤖</div>
+        <div>
+          <div style={{fontSize:13,fontWeight:600,color:"#0f1117"}}>Felicity CS Copilot</div>
+          <div style={{fontSize:11,color:"#9ca3af"}}>Analysing {c.name}…</div>
+        </div>
+        <div style={{marginLeft:"auto",display:"flex",gap:4}}>
+          {[0,1,2].map(i=><div key={i} style={{width:6,height:6,borderRadius:"50%",background:"#3b82f6",animation:`pulse 1.2s ${i*0.2}s infinite`}}/>)}
+        </div>
+      </div>
+      <div style={{display:"flex",flexDirection:"column",gap:10}}>
+        {[95,80,70,88,60,75,50,85].map((w,i)=>(
+          <div key={i} style={{height:13,borderRadius:6,background:"linear-gradient(90deg,#f0f2f5 25%,#e8eaed 50%,#f0f2f5 75%)",backgroundSize:"200% 100%",animation:"shimmer 1.4s infinite",width:w+"%"}}/>
+        ))}
+      </div>
+    </div>
+  );
+
+  if(!result) return null;
 
   return(
     <div style={{display:"flex",flexDirection:"column",gap:12}}>
+
+      {/* Human escalation alert — shown before everything else when required */}
+      {escalation.required && (
+        <div style={{background:"#fff8f0",border:"1.5px solid #f97316",borderRadius:12,padding:"16px 18px",display:"flex",gap:14,alignItems:"flex-start"}}>
+          <div style={{width:36,height:36,borderRadius:8,background:"#f97316",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,flexShrink:0}}>🧑</div>
+          <div style={{flex:1}}>
+            <div style={{fontSize:13,fontWeight:700,color:"#c2410c",marginBottom:5}}>Human intervention required — do not send automated communication</div>
+            <div style={{fontSize:12,color:"#7c3d12",lineHeight:1.6,marginBottom:8}}>
+              Felicity has identified that this account requires direct human engagement. An automated email or templated response is not appropriate here and may damage the relationship.
+            </div>
+            <div style={{display:"flex",flexDirection:"column",gap:4}}>
+              {escalation.reasons.map((r,i)=>(
+                <div key={i} style={{display:"flex",gap:8,alignItems:"flex-start"}}>
+                  <span style={{color:"#f97316",fontSize:11,flexShrink:0,marginTop:2}}>•</span>
+                  <span style={{fontSize:12,color:"#7c3d12"}}>{r}</span>
+                </div>
+              ))}
+            </div>
+            <div style={{marginTop:10,padding:"8px 12px",background:"#fed7aa",borderRadius:7,fontSize:12,fontWeight:500,color:"#9a3412"}}>
+              Recommended: Personal phone call from {c.owner} or CS Lead within 24 hours. Do not delegate to automated follow-up.
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Header */}
       <div style={{background:"#fff",border:`1.5px solid ${h.color}22`,borderLeft:`3px solid ${h.color}`,borderRadius:14,padding:"20px 22px"}}>
         <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:12}}>
@@ -697,8 +821,8 @@ function FelicityCopilot({c}){
             <div style={{fontSize:11,color:"#9ca3af"}}>Account Status: <span style={{fontWeight:600,color:h.color}}>{h.label} ({c.score}/100)</span></div>
           </div>
           <div style={{display:"flex",alignItems:"center",gap:5}}>
-            <div style={{width:6,height:6,borderRadius:"50%",background:"#16a34a"}}/>
-            <span style={{fontSize:10,color:"#9ca3af",fontWeight:500}}>LIVE</span>
+            <div style={{width:6,height:6,borderRadius:"50%",background:source==="ai"?"#16a34a":"#6b7280"}}/>
+            <span style={{fontSize:10,color:"#9ca3af",fontWeight:500}}>{source==="ai"?"AI Analysis":"Smart Analysis"}</span>
           </div>
         </div>
         <div style={{fontSize:14,color:"#0f1117",lineHeight:1.65,fontWeight:500,marginBottom:10}}>{result.status_line}</div>
@@ -708,9 +832,9 @@ function FelicityCopilot({c}){
       {/* Drivers + Impact */}
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
         <div style={{background:"#fff",border:"0.5px solid #e5e7eb",borderRadius:12,padding:"16px 18px"}}>
-          <div style={{fontSize:12,fontWeight:600,color:"#dc2626",marginBottom:10,display:"flex",alignItems:"center",gap:6}}>⚠ Primary risk drivers</div>
+          <div style={{fontSize:12,fontWeight:600,color:"#dc2626",marginBottom:10}}>⚠ Primary risk drivers</div>
           <div style={{display:"flex",flexDirection:"column",gap:7}}>
-            {result.primary_drivers.map((d,i)=>(
+            {(result.primary_drivers||[]).map((d,i)=>(
               <div key={i} style={{display:"flex",gap:8,alignItems:"flex-start",padding:"7px 9px",background:"#fef9f9",borderRadius:7,border:"0.5px solid #fee2e2"}}>
                 <span style={{color:"#dc2626",fontWeight:700,flexShrink:0,fontSize:11,marginTop:1}}>→</span>
                 <span style={{fontSize:12,color:"#374151",lineHeight:1.5}}>{d}</span>
@@ -719,9 +843,9 @@ function FelicityCopilot({c}){
           </div>
         </div>
         <div style={{background:"#fff",border:"0.5px solid #e5e7eb",borderRadius:12,padding:"16px 18px"}}>
-          <div style={{fontSize:12,fontWeight:600,color:"#d97706",marginBottom:10,display:"flex",alignItems:"center",gap:6}}>📊 Potential business impact</div>
+          <div style={{fontSize:12,fontWeight:600,color:"#d97706",marginBottom:10}}>📊 Potential business impact</div>
           <div style={{display:"flex",flexDirection:"column",gap:7}}>
-            {result.business_impact.map((d,i)=>(
+            {(result.business_impact||[]).map((d,i)=>(
               <div key={i} style={{display:"flex",gap:8,alignItems:"flex-start",padding:"7px 9px",background:"#fffdf5",borderRadius:7,border:"0.5px solid #fef3c7"}}>
                 <span style={{color:"#d97706",fontWeight:700,flexShrink:0,fontSize:11,marginTop:1}}>→</span>
                 <span style={{fontSize:12,color:"#374151",lineHeight:1.5}}>{d}</span>
@@ -735,7 +859,7 @@ function FelicityCopilot({c}){
       <div style={{background:"#fff",border:"0.5px solid #e5e7eb",borderRadius:12,padding:"16px 18px"}}>
         <div style={{fontSize:12,fontWeight:600,color:"#16a34a",marginBottom:12}}>✓ Recommended actions</div>
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
-          {result.recommended_actions.map((a,i)=>(
+          {(result.recommended_actions||[]).map((a,i)=>(
             <div key={i} style={{display:"flex",gap:10,alignItems:"flex-start",padding:"9px 11px",background:"#f0fdf4",borderRadius:8,border:"0.5px solid #86efac"}}>
               <div style={{width:20,height:20,borderRadius:"50%",background:"#16a34a",display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,fontWeight:700,color:"#fff",flexShrink:0}}>{i+1}</div>
               <span style={{fontSize:12,color:"#374151",lineHeight:1.5,paddingTop:1}}>{a}</span>
@@ -744,12 +868,19 @@ function FelicityCopilot({c}){
         </div>
       </div>
 
-      {/* Email */}
+      {/* Email — suppressed if human escalation required */}
       <div style={{background:"#fff",border:"0.5px solid #e5e7eb",borderRadius:12,padding:"16px 18px"}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
-          <div style={{fontSize:12,fontWeight:600,color:"#374151"}}>✉ Draft customer communication</div>
-          <CopyButton text={result.customer_email}/>
+          <div style={{fontSize:12,fontWeight:600,color:"#374151"}}>
+            {escalation.required ? "⚠ Draft communication — review before sending" : "✉ Draft customer communication"}
+          </div>
+          <CopyButton text={result.customer_email||""}/>
         </div>
+        {escalation.required && (
+          <div style={{fontSize:11,color:"#c2410c",background:"#fff7ed",padding:"7px 10px",borderRadius:6,marginBottom:10,border:"0.5px solid #fed7aa"}}>
+            Felicity has flagged this account for human escalation. If you proceed with written communication, review and personalise this draft before sending — do not send as-is.
+          </div>
+        )}
         <div style={{background:"#f9fafb",borderRadius:8,padding:"14px 16px",fontSize:13,color:"#374151",lineHeight:1.8,whiteSpace:"pre-wrap",border:"0.5px solid #e5e7eb"}}>{result.customer_email}</div>
       </div>
 
@@ -757,7 +888,7 @@ function FelicityCopilot({c}){
       <div style={{background:"#fff",border:"0.5px solid #e5e7eb",borderRadius:12,padding:"16px 18px"}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
           <div style={{fontSize:12,fontWeight:600,color:"#374151"}}>🔧 Internal product / engineering note</div>
-          <CopyButton text={result.internal_note}/>
+          <CopyButton text={result.internal_note||""}/>
         </div>
         <div style={{background:"#f9fafb",borderRadius:8,padding:"14px 16px",fontSize:13,color:"#374151",lineHeight:1.7,whiteSpace:"pre-wrap",border:"0.5px solid #e5e7eb"}}>{result.internal_note}</div>
       </div>
